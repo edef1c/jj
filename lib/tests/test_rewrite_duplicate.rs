@@ -18,6 +18,7 @@ use itertools::Itertools as _;
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
 use jj_lib::rewrite::duplicate_commits;
+use jj_lib::subtree::SubtreeShift;
 use jj_lib::transaction::Transaction;
 use pollster::FutureExt as _;
 use testutils::CommitBuilderExt as _;
@@ -80,6 +81,7 @@ fn test_duplicate_linear_contents() -> TestResult {
             &HashMap::new(),
             &parent_commit_ids.iter().copied().cloned().collect_vec(),
             &children_commit_ids.iter().copied().cloned().collect_vec(),
+            &SubtreeShift::None,
         )
         .block_on()
         .unwrap()

@@ -51,6 +51,32 @@ at the prefix, so upstream changes (including renames within the library)
 apply cleanly under `vendor/lib/`, and your local modifications to the
 vendored files are merged with the upstream changes like in any other merge.
 
+## Picking individual commits
+
+To apply a single upstream commit to the vendored copy without merging the
+whole history (the equivalent of `git cherry-pick -Xsubtree=PATH`), use
+`jj duplicate` with `--subtree`:
+
+```shell
+$ jj duplicate <upstream-commit> --onto trunk-head --subtree vendor/lib
+```
+
+The duplicated commit's changes are applied under `vendor/lib/`. It is a
+plain commit (no subtree prefix is recorded on it), since its parent is the
+destination rather than the upstream history.
+
+The inverse direction, `--from-subtree`, extracts the changes a commit made
+under the prefix and applies them relative to the root of the destination.
+This is how you contribute a fix made to the vendored copy back to the
+upstream history:
+
+```shell
+$ jj duplicate <trunk-commit> --onto lib@lib-upstream --from-subtree vendor/lib
+```
+
+Only the commit's changes under `vendor/lib/` are applied; changes to other
+trunk files are dropped from the duplicate.
+
 ## Git interoperability
 
 The prefix is stored in a `jj:subtree-prefixes` extra header of the Git
@@ -70,5 +96,6 @@ Caveats:
 * Changing the number of parents of a subtree merge (e.g. `jj rebase` onto a
   single destination, or `jj simplify-parents`) is rejected; recreate the
   merge with `jj new --subtree` instead.
-* Extracting the history of a subdirectory to contribute changes back
-  upstream (the equivalent of `git subtree split`) is not implemented.
+* Extracting a subdirectory's entire history as standalone commits (the
+  equivalent of `git subtree split`) is not implemented; individual commits
+  can be picked back upstream with `jj duplicate --from-subtree`.

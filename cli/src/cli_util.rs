@@ -129,6 +129,7 @@ use jj_lib::store::Store;
 use jj_lib::str_util::StringExpression;
 use jj_lib::str_util::StringMatcher;
 use jj_lib::str_util::StringPattern;
+use jj_lib::subtree::SubtreeShift;
 use jj_lib::transaction::Transaction;
 use jj_lib::transaction::TransactionCommitError;
 use jj_lib::working_copy;
@@ -3306,6 +3307,41 @@ impl LogContentFormat {
         }
         Ok(())
     }
+}
+
+/// Parses the `--subtree`/`--from-subtree` options shared by commands that
+/// reinterpret a tree relative to a subtree prefix. The two options are
+/// mutually exclusive (enforced by clap), gated behind the
+/// `experimental.subtree-merge` config, and may not name the repository root.
+pub fn parse_subtree_shift_args(
+    workspace_command: &WorkspaceCommandHelper,
+    subtree: Option<&str>,
+    from_subtree: Option<&str>,
+) -> Result<SubtreeShift, CommandError> {
+    let (flag, path_str, graft) = match (subtree, from_subtree) {
+        (Some(path_str), None) => ("--subtree", path_str, true),
+        (None, Some(path_str)) => ("--from-subtree", path_str, false),
+        (None, None) => return Ok(SubtreeShift::None),
+        (Some(_), Some(_)) => panic!("clap should reject combining the subtree options"),
+    };
+    if !workspace_command
+        .settings()
+        .get_bool("experimental.subtree-merge")?
+    {
+        return Err(user_error(format!("{flag} is experimental"))
+            .hinted("Set config `experimental.subtree-merge = true` to enable it."));
+    }
+    let path = workspace_command.parse_file_path(path_str)?;
+    if path.is_root() {
+        return Err(user_error(
+            "Subtree prefix cannot be the repository root".to_string(),
+        ));
+    }
+    Ok(if graft {
+        SubtreeShift::GraftAt(path)
+    } else {
+        SubtreeShift::ExtractAt(path)
+    })
 }
 
 pub fn short_commit_hash(commit_id: &CommitId) -> String {

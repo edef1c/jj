@@ -20,6 +20,7 @@ use jj_lib::repo::Repo as _;
 use jj_lib::rewrite::CommitRewriter;
 use jj_lib::rewrite::RebaseOptions;
 use jj_lib::rewrite::RebasedCommit;
+use jj_lib::rewrite::duplicate_commits;
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::rewrite::rebase_commit;
 use jj_lib::subtree::SubtreeShift;
@@ -512,6 +513,156 @@ fn test_simplify_ancestor_merge_skips_subtree_merge() -> TestResult {
     let mut rewriter = CommitRewriter::new(tx.repo_mut(), merge, new_parents.clone());
     rewriter.simplify_ancestor_merge()?;
     assert_eq!(rewriter.new_parents(), new_parents);
+    Ok(())
+}
+
+#[test]
+fn test_duplicate_into_subtree() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let mut tx = repo.start_transaction();
+
+    // Trunk already contains lib v1 vendored at the prefix (e.g. from an
+    // earlier subtree merge).
+    let trunk_tree = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk\n"),
+            (repo_path("vendor/lib/lib.rs"), "v1\n"),
+        ],
+    );
+    let trunk = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], trunk_tree)
+        .write_unwrap();
+
+    // Upstream lib history: v1, then a commit changing lib.rs and adding a
+    // file.
+    let lib1_tree = create_tree(repo, &[(repo_path("lib.rs"), "v1\n")]);
+    let lib1 = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], lib1_tree)
+        .write_unwrap();
+    let lib2_tree = create_tree(
+        repo,
+        &[
+            (repo_path("lib.rs"), "v2\n"),
+            (repo_path("util.rs"), "util\n"),
+        ],
+    );
+    let lib2 = tx
+        .repo_mut()
+        .new_commit(vec![lib1.id().clone()], lib2_tree)
+        .write_unwrap();
+
+    // Duplicate the upstream commit onto trunk with its changes applied
+    // under the prefix (like `git cherry-pick -Xsubtree=vendor/lib`).
+    let stats = duplicate_commits(
+        tx.repo_mut(),
+        &[lib2.id().clone()],
+        &HashMap::new(),
+        &[trunk.id().clone()],
+        &[],
+        &SubtreeShift::GraftAt(repo_path_buf("vendor/lib")),
+    )
+    .block_on()?;
+    let duplicated = &stats.duplicated_commits[lib2.id()];
+    assert_eq!(duplicated.parent_ids(), &[trunk.id().clone()]);
+    // The duplicated commit is a plain commit; no subtree prefixes recorded.
+    assert!(duplicated.subtree_prefixes().is_empty());
+    let expected = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk\n"),
+            (repo_path("vendor/lib/lib.rs"), "v2\n"),
+            (repo_path("vendor/lib/util.rs"), "util\n"),
+        ],
+    );
+    assert_tree_eq!(&duplicated.tree(), &expected);
+    Ok(())
+}
+
+#[test]
+fn test_duplicate_extract_from_subtree() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let mut tx = repo.start_transaction();
+
+    // Upstream lib history.
+    let lib1_tree = create_tree(repo, &[(repo_path("lib.rs"), "v1\n")]);
+    let lib1 = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], lib1_tree)
+        .write_unwrap();
+
+    // Trunk contains lib v1 vendored at the prefix; a trunk commit fixes the
+    // vendored lib and also touches an unrelated trunk file.
+    let trunk_tree = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk\n"),
+            (repo_path("vendor/lib/lib.rs"), "v1\n"),
+        ],
+    );
+    let trunk = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], trunk_tree)
+        .write_unwrap();
+    let trunk2_tree = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk v2\n"),
+            (repo_path("vendor/lib/lib.rs"), "v1 with fix\n"),
+        ],
+    );
+    let trunk2 = tx
+        .repo_mut()
+        .new_commit(vec![trunk.id().clone()], trunk2_tree)
+        .write_unwrap();
+
+    // Pick the fix back onto the upstream history: only the changes under
+    // the prefix apply, at root-relative paths.
+    let stats = duplicate_commits(
+        tx.repo_mut(),
+        &[trunk2.id().clone()],
+        &HashMap::new(),
+        &[lib1.id().clone()],
+        &[],
+        &SubtreeShift::ExtractAt(repo_path_buf("vendor/lib")),
+    )
+    .block_on()?;
+    let duplicated = &stats.duplicated_commits[trunk2.id()];
+    assert_eq!(duplicated.parent_ids(), &[lib1.id().clone()]);
+    assert!(duplicated.subtree_prefixes().is_empty());
+    let expected = create_tree(repo, &[(repo_path("lib.rs"), "v1 with fix\n")]);
+    assert_tree_eq!(&duplicated.tree(), &expected);
+
+    // A trunk commit that doesn't touch the prefix extracts to an empty
+    // commit.
+    let trunk3_tree = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk v3\n"),
+            (repo_path("vendor/lib/lib.rs"), "v1 with fix\n"),
+        ],
+    );
+    let trunk3 = tx
+        .repo_mut()
+        .new_commit(vec![trunk2.id().clone()], trunk3_tree)
+        .write_unwrap();
+    let stats = duplicate_commits(
+        tx.repo_mut(),
+        &[trunk3.id().clone()],
+        &HashMap::new(),
+        &[lib1.id().clone()],
+        &[],
+        &SubtreeShift::ExtractAt(repo_path_buf("vendor/lib")),
+    )
+    .block_on()?;
+    let duplicated = &stats.duplicated_commits[trunk3.id()];
+    // The base (trunk2) and the commit have the same content under the
+    // prefix, so the duplicate makes no changes relative to lib1.
+    assert_tree_eq!(&duplicated.tree(), &lib1.tree());
     Ok(())
 }
 

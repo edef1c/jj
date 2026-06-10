@@ -29,6 +29,7 @@ use tracing::instrument;
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::cli_util::compute_commit_location;
+use crate::cli_util::parse_subtree_shift_args;
 use crate::cli_util::short_commit_hash;
 use crate::command_error::CommandError;
 use crate::command_error::user_error;
@@ -97,6 +98,39 @@ pub(crate) struct DuplicateArgs {
     )]
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     insert_before: Option<Vec<RevisionArg>>,
+
+    /// Apply the duplicated commits' changes under the given directory
+    ///
+    /// Each duplicated commit's tree (and its base) is grafted at PATH when
+    /// computing its new content, so its changes apply under that directory
+    /// of the destination, like `git cherry-pick -Xsubtree=PATH`. This is
+    /// typically used to pick individual upstream commits into a vendored
+    /// copy created with `jj new --subtree`.
+    ///
+    /// Requires a destination (`--onto`, `--insert-after`, or
+    /// `--insert-before`).
+    ///
+    /// This is an experimental feature. Set config
+    /// `experimental.subtree-merge = true` to enable it.
+    #[arg(long, value_name = "PATH")]
+    subtree: Option<String>,
+
+    /// Apply the duplicated commits' changes made under the given directory
+    ///
+    /// The subtree at PATH is extracted from each duplicated commit's tree
+    /// (and its base) when computing its new content, so only the changes
+    /// made under that directory apply, relative to the root of the
+    /// destination. This is the inverse of `--subtree` and is typically used
+    /// to pick changes made to a vendored copy back onto its upstream
+    /// history.
+    ///
+    /// Requires a destination (`--onto`, `--insert-after`, or
+    /// `--insert-before`).
+    ///
+    /// This is an experimental feature. Set config
+    /// `experimental.subtree-merge = true` to enable it.
+    #[arg(long, value_name = "PATH", conflicts_with = "subtree")]
+    from_subtree: Option<String>,
 }
 
 #[instrument(skip_all)]
@@ -140,6 +174,23 @@ pub(crate) async fn cmd_duplicate(
                 .await?,
             )
         };
+
+    let subtree_shift = parse_subtree_shift_args(
+        &workspace_command,
+        args.subtree.as_deref(),
+        args.from_subtree.as_deref(),
+    )?;
+    if !subtree_shift.is_none() && location.is_none() {
+        let flag = if args.subtree.is_some() {
+            "--subtree"
+        } else {
+            "--from-subtree"
+        };
+        return Err(user_error(format!("{flag} requires a destination")).hinted(
+            "Specify where to duplicate the commits with `--onto`, `--insert-after`, or \
+             `--insert-before`.",
+        ));
+    }
 
     let mut tx = workspace_command.start_transaction();
 
@@ -201,6 +252,7 @@ pub(crate) async fn cmd_duplicate(
             &new_descs,
             &parent_commit_ids,
             &children_commit_ids,
+            &subtree_shift,
         )
         .await?
     } else {

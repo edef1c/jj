@@ -55,6 +55,7 @@ use crate::revset::RevsetExpression;
 use crate::revset::RevsetStreamExt as _;
 use crate::store::Store;
 use crate::subtree::SubtreePrefixes;
+use crate::subtree::SubtreeShift;
 use crate::subtree::graft_merged_tree;
 
 /// Returns the tree of `commit` grafted at `prefix`, with the commit's
@@ -309,6 +310,11 @@ pub struct CommitRewriter<'repo> {
     /// Per-parent subtree prefixes for the new parents, kept in lockstep with
     /// `new_parents`. Either empty or one entry per new parent.
     new_subtree_prefixes: Vec<RepoPathBuf>,
+    /// Shift applied to the old commit's tree (and its merged parent tree)
+    /// when computing the rebased tree: grafting makes the commit's changes
+    /// apply under a directory of the new parents, extraction applies the
+    /// changes made under a directory to a standalone history.
+    old_tree_shift: SubtreeShift,
 }
 
 /// The old commit's subtree prefixes carried over to the new parents. The new
@@ -339,6 +345,7 @@ impl<'repo> CommitRewriter<'repo> {
             old_commit,
             new_parents,
             new_subtree_prefixes,
+            old_tree_shift: SubtreeShift::None,
         }
     }
 
@@ -356,6 +363,7 @@ impl<'repo> CommitRewriter<'repo> {
             old_commit,
             new_parents,
             new_subtree_prefixes,
+            old_tree_shift: SubtreeShift::None,
         }
     }
 
@@ -403,6 +411,16 @@ impl<'repo> CommitRewriter<'repo> {
     /// [`Self::new_parents()`].
     pub fn new_subtree_prefixes(&self) -> &[RepoPathBuf] {
         &self.new_subtree_prefixes
+    }
+
+    /// Set the shift applied to the old commit's tree (and its merged parent
+    /// tree) when computing the rebased tree. Grafting makes the commit's
+    /// changes apply under a directory of the new parents (like
+    /// `git cherry-pick -Xsubtree=<prefix>`); extraction applies the changes
+    /// made under a directory to a standalone history. This is used to
+    /// duplicate commits into or out of a subtree.
+    pub fn set_old_tree_shift(&mut self, shift: SubtreeShift) {
+        self.old_tree_shift = shift;
     }
 
     /// Update the intended new parents by replacing any occurrence of
@@ -508,6 +526,7 @@ impl<'repo> CommitRewriter<'repo> {
 
         let (was_empty, new_tree) = if new_parent_trees == old_parent_trees
             && self.new_subtree_prefixes == self.old_commit.subtree_prefixes()
+            && self.old_tree_shift.is_none()
         {
             (
                 // Optimization: was_empty is only used for newly empty, but when the
@@ -526,8 +545,14 @@ impl<'repo> CommitRewriter<'repo> {
                 merge_commit_trees(self.mut_repo, &new_parents, &self.new_subtree_prefixes);
             let old_tree = self.old_commit.tree();
             let (old_base_tree, new_base_tree) = try_join!(old_base_tree_fut, new_base_tree_fut)?;
+            let was_empty = old_base_tree.tree_ids() == self.old_commit.tree_ids();
+            // Shift the old commit's side of the three-way merge so that its
+            // changes apply at the right paths.
+            let old_base_tree = self.old_tree_shift.apply(&old_base_tree).await?;
+            let old_tree = self.old_tree_shift.apply(&old_tree).await?;
+            let graft_suffix = self.old_tree_shift.conflict_label_suffix();
             (
-                old_base_tree.tree_ids() == self.old_commit.tree_ids(),
+                was_empty,
                 MergedTree::merge(Merge::from_vec(vec![
                     (
                         new_base_tree,
@@ -539,13 +564,16 @@ impl<'repo> CommitRewriter<'repo> {
                     (
                         old_base_tree,
                         format!(
-                            "{} (parents of rebased revision)",
+                            "{} (parents of rebased revision){graft_suffix}",
                             conflict_label_for_commits(&old_parents)
                         ),
                     ),
                     (
                         old_tree,
-                        format!("{} (rebased revision)", self.old_commit.conflict_label()),
+                        format!(
+                            "{} (rebased revision){graft_suffix}",
+                            self.old_commit.conflict_label()
+                        ),
                     ),
                 ]))
                 .await?,
@@ -1197,12 +1225,19 @@ pub struct DuplicateCommitsStats {
 /// should not be ancestors of `parent_commit_ids`. Commits in
 /// `target_commit_ids` should be in reverse topological order (children before
 /// parents).
+///
+/// `subtree_shift` controls how each duplicated commit's tree (and its base)
+/// is reinterpreted when computing the new tree: grafting applies the
+/// commits' changes under a directory of the destination (like
+/// `git cherry-pick -Xsubtree=<prefix>`), extraction applies the changes
+/// made under a directory to a standalone history.
 pub async fn duplicate_commits(
     mut_repo: &mut MutableRepo,
     target_commit_ids: &[CommitId],
     target_descriptions: &HashMap<CommitId, String>,
     parent_commit_ids: &[CommitId],
     children_commit_ids: &[CommitId],
+    subtree_shift: &SubtreeShift,
 ) -> BackendResult<DuplicateCommitsStats> {
     if target_commit_ids.is_empty() {
         return Ok(DuplicateCommitsStats::default());
@@ -1275,7 +1310,9 @@ pub async fn duplicate_commits(
                 })
                 .collect()
         };
-        let mut new_commit_builder = CommitRewriter::new(mut_repo, original_commit, new_parent_ids)
+        let mut rewriter = CommitRewriter::new(mut_repo, original_commit, new_parent_ids);
+        rewriter.set_old_tree_shift(subtree_shift.clone());
+        let mut new_commit_builder = rewriter
             .rebase()
             .await?
             .clear_rewrite_source()

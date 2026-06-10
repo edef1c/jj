@@ -16,6 +16,7 @@ use crate::common::CommandOutput;
 use crate::common::TestEnvironment;
 use crate::common::TestWorkDir;
 use crate::common::create_commit;
+use crate::common::create_commit_with_files;
 
 #[test]
 fn test_duplicate() {
@@ -2539,4 +2540,177 @@ fn get_log_output_with_ts(work_dir: &TestWorkDir) -> CommandOutput {
     commit_id.short() ++ "   " ++ description.first_line() ++ " @ " ++ committer.timestamp()
     "#;
     work_dir.run_jj(["log", "-T", template])
+}
+
+#[test]
+fn test_duplicate_subtree() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Trunk contains lib v1 vendored at the prefix; upstream lib gains a
+    // commit on top of v1.
+    create_commit_with_files(
+        &work_dir,
+        "trunk",
+        &[],
+        &[("README", "trunk\n"), ("vendor/lib/lib.rs", "v1\n")],
+    );
+    create_commit_with_files(&work_dir, "lib1", &["root()"], &[("lib.rs", "v1\n")]);
+    create_commit_with_files(
+        &work_dir,
+        "lib2",
+        &["lib1"],
+        &[("lib.rs", "v2\n"), ("util.rs", "util\n")],
+    );
+
+    // The flag is gated behind an experimental config.
+    let output = work_dir.run_jj([
+        "duplicate",
+        "lib2",
+        "--onto",
+        "trunk",
+        "--subtree",
+        "vendor/lib",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: --subtree is experimental
+    Hint: Set config `experimental.subtree-merge = true` to enable it.
+    [EOF]
+    [exit status: 1]
+    ");
+
+    test_env.add_config("experimental.subtree-merge = true");
+
+    // A destination is required.
+    let output = work_dir.run_jj(["duplicate", "lib2", "--subtree", "vendor/lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: --subtree requires a destination
+    Hint: Specify where to duplicate the commits with `--onto`, `--insert-after`, or `--insert-before`.
+    [EOF]
+    [exit status: 1]
+    ");
+    // The root path is rejected.
+    let output = work_dir.run_jj(["duplicate", "lib2", "--onto", "trunk", "--subtree", ""]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Subtree prefix cannot be the repository root
+    [EOF]
+    [exit status: 1]
+    ");
+
+    // Pick the upstream commit into the vendored copy.
+    let output = work_dir.run_jj([
+        "duplicate",
+        "lib2",
+        "--onto",
+        "trunk",
+        "--subtree",
+        "vendor/lib",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Duplicated 9189bb67fe0d as kpqxywon 8b77886f lib2
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "list", "-r", "trunk+"]);
+    insta::assert_snapshot!(output, @"
+    README
+    vendor/lib/lib.rs
+    vendor/lib/util.rs
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "show", "-r", "trunk+", "vendor/lib/lib.rs"]);
+    insta::assert_snapshot!(output, @"
+    v2
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["diff", "-r", "trunk+", "--summary"]);
+    insta::assert_snapshot!(output, @"
+    M vendor/lib/lib.rs
+    A vendor/lib/util.rs
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_duplicate_from_subtree() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+    test_env.add_config("experimental.subtree-merge = true");
+
+    // Upstream lib history, and a trunk that vendors lib v1. A trunk commit
+    // fixes the vendored lib and also touches an unrelated trunk file.
+    create_commit_with_files(&work_dir, "lib1", &[], &[("lib.rs", "v1\n")]);
+    create_commit_with_files(
+        &work_dir,
+        "trunk",
+        &["root()"],
+        &[("README", "trunk\n"), ("vendor/lib/lib.rs", "v1\n")],
+    );
+    create_commit_with_files(
+        &work_dir,
+        "fix",
+        &["trunk"],
+        &[
+            ("README", "trunk v2\n"),
+            ("vendor/lib/lib.rs", "v1 with fix\n"),
+        ],
+    );
+
+    // --subtree and --from-subtree are mutually exclusive.
+    let output = work_dir.run_jj([
+        "duplicate",
+        "fix",
+        "--onto",
+        "lib1",
+        "--subtree",
+        "vendor/lib",
+        "--from-subtree",
+        "vendor/lib",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    error: the argument '--subtree <PATH>' cannot be used with '--from-subtree <PATH>'
+
+    Usage: jj duplicate --onto <REVSETS> --subtree <PATH> <REVSETS>...
+
+    For more information, try '--help'.
+    [EOF]
+    [exit status: 2]
+    ");
+
+    // Pick the vendored fix back onto the upstream history.
+    let output = work_dir.run_jj([
+        "duplicate",
+        "fix",
+        "--onto",
+        "lib1",
+        "--from-subtree",
+        "vendor/lib",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Duplicated 21ed88cc40ee as yostqsxw 4ec5784c fix
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "list", "-r", "lib1+"]);
+    insta::assert_snapshot!(output, @"
+    lib.rs
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "show", "-r", "lib1+", "lib.rs"]);
+    insta::assert_snapshot!(output, @"
+    v1 with fix
+    [EOF]
+    ");
+    // Only the changes under the prefix apply; the README change is dropped.
+    let output = work_dir.run_jj(["diff", "-r", "lib1+", "--summary"]);
+    insta::assert_snapshot!(output, @"
+    M lib.rs
+    [EOF]
+    ");
 }

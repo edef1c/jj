@@ -32,7 +32,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefix is recorded with the commit (and round-trips through Git as a commit
   header), so diffs stay clean, rebasing preserves the graft, and later pulls
   of the same history merge cleanly under the prefix. Enable with config
-  `experimental.subtree-merge = true`.
+  `experimental.subtree-merge = true`. `jj duplicate --subtree PATH` applies
+  duplicated commits' changes under a directory, like
+  `git cherry-pick -Xsubtree=PATH`, and `jj duplicate --from-subtree PATH`
+  applies the changes made under a directory to a standalone history, for
+  picking changes to a vendored copy back onto its upstream.
 
 ### Fixed bugs
 

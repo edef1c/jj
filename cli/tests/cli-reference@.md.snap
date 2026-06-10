@@ -1040,6 +1040,20 @@ By default, the duplicated commits retain the descriptions of the originals. Thi
 * `-o`, `--onto <REVSETS>` [alias: `destination`] — The revision(s) to duplicate onto (can be repeated to create a merge commit)
 * `-A`, `--insert-after <REVSETS>` [alias: `after`] — The revision(s) to insert after (can be repeated to create a merge commit)
 * `-B`, `--insert-before <REVSETS>` [alias: `before`] — The revision(s) to insert before (can be repeated to create a merge commit)
+* `--subtree <PATH>` — Apply the duplicated commits' changes under the given directory
+
+   Each duplicated commit's tree (and its base) is grafted at PATH when computing its new content, so its changes apply under that directory of the destination, like `git cherry-pick -Xsubtree=PATH`. This is typically used to pick individual upstream commits into a vendored copy created with `jj new --subtree`.
+
+   Requires a destination (`--onto`, `--insert-after`, or `--insert-before`).
+
+   This is an experimental feature. Set config `experimental.subtree-merge = true` to enable it.
+* `--from-subtree <PATH>` — Apply the duplicated commits' changes made under the given directory
+
+   The subtree at PATH is extracted from each duplicated commit's tree (and its base) when computing its new content, so only the changes made under that directory apply, relative to the root of the destination. This is the inverse of `--subtree` and is typically used to pick changes made to a vendored copy back onto its upstream history.
+
+   Requires a destination (`--onto`, `--insert-after`, or `--insert-before`).
+
+   This is an experimental feature. Set config `experimental.subtree-merge = true` to enable it.
 
 
 
