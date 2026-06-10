@@ -26,6 +26,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 * `jj show` now supports `--reversed` flag.
 
+* New experimental support for subtree merges, similar to git's `-s subtree`
+  merge strategy: `jj new trunk --subtree vendor/lib=REVSET` creates a merge
+  commit in which the given revision's tree is grafted at `vendor/lib/`. The
+  prefix is recorded with the commit (and round-trips through Git as a commit
+  header), so diffs stay clean, rebasing preserves the graft, and later pulls
+  of the same history merge cleanly under the prefix. Enable with config
+  `experimental.subtree-merge = true`.
+
 ### Fixed bugs
 
 * `jj` now creates a new working-copy revision during snapshotting if the
