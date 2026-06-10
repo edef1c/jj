@@ -21,7 +21,9 @@ use itertools::Itertools as _;
 use jj_lib::copies::CopyRecords;
 use jj_lib::merge::Diff;
 use jj_lib::repo::Repo as _;
+use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::rewrite::merge_commit_trees;
+use jj_lib::subtree::SubtreeShift;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
@@ -181,13 +183,33 @@ pub(crate) async fn cmd_diff(
             .flatten()
             .collect();
         let parents = parents.into_iter().collect_vec();
-        from_tree = merge_commit_trees(repo.as_ref(), &parents, &[]).await?;
+        // With a single root, the parents are exactly that root's parents, so
+        // its subtree prefixes (if any) apply when merging them.
+        let from_prefixes: &[RepoPathBuf] = match &roots[..] {
+            [root] if root.subtree_prefixes().len() == parents.len() => root.subtree_prefixes(),
+            _ => &[],
+        };
+        from_tree = merge_commit_trees(repo.as_ref(), &parents, from_prefixes).await?;
         to_tree = merge_commit_trees(repo.as_ref(), &heads, &[]).await?;
 
-        for p in &parents {
+        for (i, p) in parents.iter().enumerate() {
+            // The records' source paths are in the parent's own coordinates;
+            // translate them by the parent's subtree prefix applied above.
+            let shift = match from_prefixes.get(i) {
+                Some(prefix) if !prefix.is_root() => Some(SubtreeShift::GraftAt(prefix.clone())),
+                _ => None,
+            };
             for to in &heads {
                 let records = get_copy_records(repo.store(), p.id(), to.id(), &matcher).await?;
-                copy_records.add_records(records);
+                match &shift {
+                    None => copy_records.add_records(records),
+                    Some(shift) => {
+                        copy_records.add_records(records.into_iter().filter_map(|mut record| {
+                            record.source = shift.apply_to_path(&record.source)?;
+                            (record.source != record.target).then_some(record)
+                        }));
+                    }
+                }
             }
         }
     }

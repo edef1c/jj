@@ -22,6 +22,7 @@ use indexmap::IndexSet;
 use itertools::Itertools as _;
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo as _;
+use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::rewrite::rebase_commit;
 use tracing::instrument;
@@ -30,7 +31,9 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
 use crate::cli_util::compute_commit_location;
 use crate::cli_util::merge_args_with;
+use crate::cli_util::short_commit_hash;
 use crate::command_error::CommandError;
+use crate::command_error::user_error;
 use crate::complete;
 use crate::description_util::add_trailers;
 use crate::description_util::join_message_paragraphs;
@@ -117,6 +120,29 @@ pub(crate) struct NewArgs {
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
     insert_after: Option<Vec<RevisionArg>>,
 
+    /// Add a parent whose tree is grafted at the given path (subtree merge)
+    ///
+    /// `--subtree PATH=REVSET` adds the revision identified by REVSET as an
+    /// additional parent of the new change, and records that its tree is
+    /// located at the directory PATH. The recorded prefix is persisted with
+    /// the commit, is respected by e.g. `jj diff` and `jj rebase`, and makes
+    /// later merges of the same history apply cleanly under the prefix (like
+    /// git's "subtree" merge strategy).
+    ///
+    /// Example: `jj new trunk --subtree vendor/lib=lib@upstream` creates a
+    /// merge of `trunk` and `lib@upstream` in which the latter's tree is
+    /// located under `vendor/lib/`.
+    ///
+    /// This is an experimental feature. Set config
+    /// `experimental.subtree-merge = true` to enable it.
+    #[arg(
+        long,
+        value_name = "PATH=REVSET",
+        conflicts_with = "insert_after",
+        conflicts_with = "insert_before"
+    )]
+    subtree: Vec<String>,
+
     /// Insert the new change before the given commit(s)
     ///
     /// Example: `jj new --insert-before C` creates a new change between `C` and
@@ -177,7 +203,7 @@ pub(crate) async fn cmd_new(
             |_id, value| value.clone(),
         )),
     };
-    let (parent_commit_ids, child_commit_ids) = compute_commit_location(
+    let (mut parent_commit_ids, child_commit_ids) = compute_commit_location(
         ui,
         &workspace_command,
         revision_args.as_deref(),
@@ -186,12 +212,55 @@ pub(crate) async fn cmd_new(
         "new commit",
     )
     .await?;
-    let parent_commits = try_join_all(
+    let mut parent_commits = try_join_all(
         parent_commit_ids
             .iter()
             .map(|commit_id| workspace_command.repo().store().get_commit_async(commit_id)),
     )
     .await?;
+
+    let mut subtree_prefixes: Vec<RepoPathBuf> = vec![];
+    if !args.subtree.is_empty() {
+        if !workspace_command
+            .settings()
+            .get_bool("experimental.subtree-merge")?
+        {
+            return Err(user_error("--subtree is experimental")
+                .hinted("Set config `experimental.subtree-merge = true` to enable it."));
+        }
+        subtree_prefixes = vec![RepoPathBuf::root(); parent_commit_ids.len()];
+        let mut seen_paths: HashSet<RepoPathBuf> = HashSet::new();
+        for value in &args.subtree {
+            let Some((path_str, revset_str)) = value.split_once('=') else {
+                return Err(user_error(format!(
+                    "Invalid subtree specification '{value}': expected PATH=REVSET"
+                )));
+            };
+            let path = workspace_command.parse_file_path(path_str)?;
+            if path.is_root() {
+                return Err(user_error(
+                    "Subtree prefix cannot be the repository root".to_string(),
+                ));
+            }
+            if !seen_paths.insert(path.clone()) {
+                return Err(user_error(format!(
+                    "Subtree prefix '{path_str}' is used more than once"
+                )));
+            }
+            let commit = workspace_command
+                .resolve_single_rev(ui, &RevisionArg::from(revset_str.to_owned()))
+                .await?;
+            if parent_commit_ids.contains(commit.id()) {
+                return Err(user_error(format!(
+                    "Revision {} is already a parent of the new change",
+                    short_commit_hash(commit.id()),
+                )));
+            }
+            parent_commit_ids.push(commit.id().clone());
+            parent_commits.push(commit);
+            subtree_prefixes.push(path);
+        }
+    }
     let mut advance_bookmarks_target = None;
     let mut advanceable_bookmarks = vec![];
 
@@ -207,11 +276,12 @@ pub(crate) async fn cmd_new(
     let parent_commit_ids_set: HashSet<CommitId> = parent_commit_ids.iter().cloned().collect();
 
     let mut tx = workspace_command.start_transaction();
-    let merged_tree = merge_commit_trees(tx.repo(), &parent_commits, &[]).await?;
+    let merged_tree = merge_commit_trees(tx.repo(), &parent_commits, &subtree_prefixes).await?;
     let mut commit_builder = tx
         .repo_mut()
         .new_commit(parent_commit_ids, merged_tree)
         .detach();
+    commit_builder.set_subtree_prefixes(subtree_prefixes);
     let description = if !args.message_paragraphs.is_empty() {
         join_message_paragraphs(&args.message_paragraphs)
     } else {

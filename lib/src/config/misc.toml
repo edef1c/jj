@@ -55,3 +55,4 @@ exec-bit-change = "auto"
 
 [experimental]
 record-predecessors-in-commit = true
+subtree-merge = false

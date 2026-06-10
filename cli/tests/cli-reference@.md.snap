@@ -2167,6 +2167,13 @@ Note that you can create a merge commit by specifying multiple revisions as argu
        |  |         / \
        A  X        A   X
    ```
+* `--subtree <PATH=REVSET>` — Add a parent whose tree is grafted at the given path (subtree merge)
+
+   `--subtree PATH=REVSET` adds the revision identified by REVSET as an additional parent of the new change, and records that its tree is located at the directory PATH. The recorded prefix is persisted with the commit, is respected by e.g. `jj diff` and `jj rebase`, and makes later merges of the same history apply cleanly under the prefix (like git's "subtree" merge strategy).
+
+   Example: `jj new trunk --subtree vendor/lib=lib@upstream` creates a merge of `trunk` and `lib@upstream` in which the latter's tree is located under `vendor/lib/`.
+
+   This is an experimental feature. Set config `experimental.subtree-merge = true` to enable it.
 * `-B`, `--insert-before <REVSETS>` [alias: `before`] — Insert the new change before the given commit(s)
 
    Example: `jj new --insert-before C` creates a new change between `C` and

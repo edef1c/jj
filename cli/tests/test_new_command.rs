@@ -1017,3 +1017,190 @@ fn get_short_log_output(work_dir: &TestWorkDir) -> CommandOutput {
     let template = r#"if(description, description, "root")"#;
     work_dir.run_jj(["log", "-T", template])
 }
+
+#[test]
+fn test_new_subtree() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    create_commit_with_files(&work_dir, "trunk", &[], &[("README", "trunk\n")]);
+    create_commit_with_files(&work_dir, "lib", &["root()"], &[("lib.rs", "v1\n")]);
+
+    // The flag is gated behind an experimental config.
+    let output = work_dir.run_jj(["new", "trunk", "--subtree", "vendor/lib=lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: --subtree is experimental
+    Hint: Set config `experimental.subtree-merge = true` to enable it.
+    [EOF]
+    [exit status: 1]
+    ");
+
+    test_env.add_config("experimental.subtree-merge = true");
+
+    // Invalid arguments
+    let output = work_dir.run_jj(["new", "trunk", "--subtree", "vendor-lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Invalid subtree specification 'vendor-lib': expected PATH=REVSET
+    [EOF]
+    [exit status: 1]
+    ");
+    let output = work_dir.run_jj(["new", "trunk", "--subtree", "=lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Subtree prefix cannot be the repository root
+    [EOF]
+    [exit status: 1]
+    ");
+    let output = work_dir.run_jj(["new", "trunk", "--subtree", "vendor/lib=trunk"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Revision 910c0426645b is already a parent of the new change
+    [EOF]
+    [exit status: 1]
+    ");
+    let output = work_dir.run_jj([
+        "new",
+        "trunk",
+        "--subtree",
+        "vendor/lib=lib",
+        "--subtree",
+        "vendor/lib=trunk",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Subtree prefix 'vendor/lib' is used more than once
+    [EOF]
+    [exit status: 1]
+    ");
+
+    // Create the subtree merge.
+    let output = work_dir.run_jj([
+        "new",
+        "trunk",
+        "--subtree",
+        "vendor/lib=lib",
+        "-m",
+        "merge lib",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: kpqxywon 5bb8c0ae (empty) merge lib
+    Parent commit (@-)      : rlvkpnrz 910c0426 trunk | trunk
+    Parent commit (@-)      : zsuskuln fdef127c lib | lib
+    Added 2 files, modified 0 files, removed 1 files
+    [EOF]
+    ");
+    insta::assert_snapshot!(get_log_output(&work_dir), @"
+    @    5bb8c0aef44393319195f73229736b015395ce9a merge lib
+    ├─╮
+    │ ○  fdef127cb55ce3b0b40a6a22d6464a081964f776 lib
+    ○ │  910c0426645b0dc93fbbe30ee104d28ec8eba128 trunk
+    ├─╯
+    ◆  0000000000000000000000000000000000000000
+    [EOF]
+    ");
+    // The lib files appear under the prefix.
+    let output = work_dir.run_jj(["file", "list"]);
+    insta::assert_snapshot!(output, @"
+    README
+    vendor/lib/lib.rs
+    [EOF]
+    ");
+    // The merge commit's diff against its parents is empty: the graft is not
+    // considered a change of the commit itself.
+    let output = work_dir.run_jj(["diff", "-r", "@", "--summary"]);
+    insta::assert_snapshot!(output, @"");
+    let output = work_dir.run_jj(["status"]);
+    insta::assert_snapshot!(output, @"
+    The working copy has no changes.
+    Working copy  (@) : kpqxywon 5bb8c0ae (empty) merge lib
+    Parent commit (@-): rlvkpnrz 910c0426 trunk | trunk
+    Parent commit (@-): zsuskuln fdef127c lib | lib
+    [EOF]
+    ");
+    work_dir
+        .run_jj(["bookmark", "create", "-r@", "merge"])
+        .success();
+
+    // Lib advances upstream; pulling it in merges cleanly under the prefix.
+    create_commit_with_files(&work_dir, "lib2", &["lib"], &[("lib.rs", "v2\n")]);
+    let output = work_dir.run_jj([
+        "new",
+        "merge",
+        "--subtree",
+        "vendor/lib=lib2",
+        "-m",
+        "pull lib v2",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: xtnwkqum b7615fc0 (empty) pull lib v2
+    Parent commit (@-)      : kpqxywon 5bb8c0ae merge | (empty) merge lib
+    Parent commit (@-)      : uyznsvlq 96bb351d lib2 | lib2
+    Added 2 files, modified 0 files, removed 1 files
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "show", "vendor/lib/lib.rs"]);
+    insta::assert_snapshot!(output, @"
+    v2
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["diff", "-r", "@", "--summary"]);
+    insta::assert_snapshot!(output, @"");
+}
+
+#[test]
+fn test_new_subtree_copy_records() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+    test_env.add_config("experimental.subtree-merge = true");
+
+    // The vendored file must be large enough to trigger the git backend's
+    // rename detection between the upstream commit and the merge commit.
+    let big_content: String = (1..=60).map(|i| format!("line {i}\n")).collect();
+    create_commit_with_files(&work_dir, "trunk", &[], &[("README", "trunk\n")]);
+    create_commit_with_files(&work_dir, "lib", &["root()"], &[("big.js", &big_content)]);
+
+    work_dir
+        .run_jj([
+            "new",
+            "trunk",
+            "--subtree",
+            "vendor/lib=lib",
+            "-m",
+            "import",
+        ])
+        .success();
+    // Amend the merge commit so that the vendored file differs from the
+    // upstream content. Rename detection between the upstream commit and the
+    // merge maps `big.js` to `vendor/lib/big.js`; the record's source must
+    // be translated by the prefix, or the whole file renders as renamed
+    // from a path that is empty in the (grafted) parent tree.
+    work_dir.write_file("vendor/lib/big.js", format!("{big_content}local line\n"));
+    let output = work_dir.run_jj(["log", "--stat", "-r", "@", "--no-graph"]);
+    insta::assert_snapshot!(output, @"
+    royxmykx test.user@example.com 2001-02-03 08:05:13 e4368bad
+    import
+    vendor/lib/big.js | 1 +
+    1 file changed, 1 insertion(+), 0 deletions(-)
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["status"]);
+    insta::assert_snapshot!(output, @"
+    Working copy changes:
+    M vendor/lib/big.js
+    Working copy  (@) : royxmykx e4368bad import
+    Parent commit (@-): rlvkpnrz 910c0426 trunk | trunk
+    Parent commit (@-): zsuskuln 91e072ad lib | lib
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["diff", "-r", "@", "--summary"]);
+    insta::assert_snapshot!(output, @"
+    M vendor/lib/big.js
+    [EOF]
+    ");
+}
