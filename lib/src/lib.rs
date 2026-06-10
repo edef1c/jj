@@ -107,6 +107,7 @@ pub mod stacked_table;
 pub mod store;
 pub mod str_util;
 pub mod submodule_store;
+pub mod subtree;
 #[cfg(feature = "testing")]
 pub mod test_signing_backend;
 pub mod time_util;

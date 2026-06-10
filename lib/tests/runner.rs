@@ -39,5 +39,6 @@ mod test_rewrite_duplicate;
 mod test_rewrite_transform;
 mod test_signing;
 mod test_ssh_signing;
+mod test_subtree;
 mod test_view;
 mod test_workspace;
