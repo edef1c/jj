@@ -32,11 +32,13 @@ use crate::merge::Merge;
 use crate::merged_tree::MergedTree;
 use crate::repo::MutableRepo;
 use crate::repo::Repo;
+use crate::repo_path::RepoPathBuf;
 use crate::settings::JJRng;
 use crate::settings::SignSettings;
 use crate::settings::UserSettings;
 use crate::signing::SignBehavior;
 use crate::store::Store;
+use crate::subtree::SubtreePrefixes;
 
 #[must_use]
 pub struct CommitBuilder<'repo> {
@@ -74,6 +76,15 @@ impl CommitBuilder<'_> {
 
     pub fn set_predecessors(mut self, predecessors: Vec<CommitId>) -> Self {
         self.inner.set_predecessors(predecessors);
+        self
+    }
+
+    pub fn subtree_prefixes(&self) -> &[RepoPathBuf] {
+        self.inner.subtree_prefixes()
+    }
+
+    pub fn set_subtree_prefixes(mut self, prefixes: Vec<RepoPathBuf>) -> Self {
+        self.inner.set_subtree_prefixes(prefixes);
         self
     }
 
@@ -202,6 +213,7 @@ impl DetachedCommitBuilder {
             predecessors: vec![],
             root_tree,
             conflict_labels: conflict_labels.into_merge(),
+            subtree_prefixes: vec![],
             change_id,
             description: String::new(),
             author: signature.clone(),
@@ -301,6 +313,19 @@ impl DetachedCommitBuilder {
 
     pub fn set_predecessors(&mut self, predecessors: Vec<CommitId>) -> &mut Self {
         self.predecessors = predecessors;
+        self
+    }
+
+    pub fn subtree_prefixes(&self) -> &[RepoPathBuf] {
+        &self.commit.subtree_prefixes
+    }
+
+    /// Sets the per-parent subtree prefixes. The prefixes are normalized, so
+    /// a list in which every entry is the root path is treated as "no
+    /// prefixes". If non-empty after normalization, the prefixes must have
+    /// exactly one entry per parent by the time the commit is written.
+    pub fn set_subtree_prefixes(&mut self, prefixes: Vec<RepoPathBuf>) -> &mut Self {
+        self.commit.subtree_prefixes = SubtreePrefixes::from_vec(prefixes).into_vec();
         self
     }
 

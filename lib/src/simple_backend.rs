@@ -67,6 +67,7 @@ use crate::object_id::ObjectId;
 use crate::repo_path::RepoPath;
 use crate::repo_path::RepoPathBuf;
 use crate::repo_path::RepoPathComponentBuf;
+use crate::subtree::SubtreePrefixes;
 
 const COMMIT_ID_LENGTH: usize = 64;
 const CHANGE_ID_LENGTH: usize = 16;
@@ -365,6 +366,11 @@ pub fn commit_to_proto(commit: &Commit) -> crate::protos::simple_store::Commit {
     if !commit.conflict_labels.is_resolved() {
         proto.conflict_labels = commit.conflict_labels.as_slice().to_owned();
     }
+    proto.subtree_prefixes = commit
+        .subtree_prefixes
+        .iter()
+        .map(|prefix| prefix.as_internal_file_string().to_owned())
+        .collect();
     proto.change_id = commit.change_id.to_bytes();
     proto.description = commit.description.clone();
     proto.author = Some(signature_to_proto(&commit.author));
@@ -385,12 +391,23 @@ fn commit_from_proto(mut proto: crate::protos::simple_store::Commit) -> Commit {
     let merge_builder: MergeBuilder<_> = proto.root_tree.into_iter().map(TreeId::new).collect();
     let root_tree = merge_builder.build();
     let conflict_labels = ConflictLabels::from_vec(proto.conflict_labels);
+    let subtree_prefixes = SubtreePrefixes::from_vec(
+        proto
+            .subtree_prefixes
+            .iter()
+            .map(|path| {
+                RepoPathBuf::from_internal_string(path.as_str())
+                    .expect("subtree prefix should be a valid repo path")
+            })
+            .collect(),
+    );
     let change_id = ChangeId::new(proto.change_id);
     Commit {
         parents,
         predecessors,
         root_tree,
         conflict_labels: conflict_labels.into_merge(),
+        subtree_prefixes: subtree_prefixes.into_vec(),
         change_id,
         description: proto.description,
         author: signature_from_proto(proto.author.unwrap_or_default()),
@@ -525,6 +542,7 @@ mod tests {
             predecessors: vec![],
             root_tree: Merge::resolved(backend.empty_tree_id().clone()),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: ChangeId::from_hex("abc123"),
             description: "".to_string(),
             author: create_signature(),
@@ -566,6 +584,41 @@ mod tests {
         let root_merge_id = write_commit(commit.clone())?.0;
         let root_merge_commit = backend.read_commit(&root_merge_id).block_on()?;
         assert_eq!(root_merge_commit, commit);
+        Ok(())
+    }
+
+    /// Test that subtree prefixes round trip through the proto.
+    #[test]
+    fn write_commit_subtree_prefixes() -> TestResult {
+        let temp_dir = new_temp_dir();
+        let backend = SimpleBackend::init(temp_dir.path());
+        let mut commit = Commit {
+            parents: vec![backend.root_commit_id().clone()],
+            predecessors: vec![],
+            root_tree: Merge::resolved(backend.empty_tree_id().clone()),
+            conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
+            change_id: ChangeId::from_hex("abc123"),
+            description: "".to_string(),
+            author: create_signature(),
+            committer: create_signature(),
+            secure_sig: None,
+        };
+
+        commit.description = "a".to_string();
+        let first_id = backend.write_commit(commit.clone(), None).block_on()?.0;
+        commit.description = "b".to_string();
+        let second_id = backend.write_commit(commit.clone(), None).block_on()?.0;
+
+        commit.description = "merge".to_string();
+        commit.parents = vec![first_id, second_id];
+        commit.subtree_prefixes = vec![
+            RepoPathBuf::root(),
+            RepoPathBuf::from_internal_string("vendor/my lib").unwrap(),
+        ];
+        let merge_id = backend.write_commit(commit.clone(), None).block_on()?.0;
+        let merge_commit = backend.read_commit(&merge_id).block_on()?;
+        assert_eq!(merge_commit, commit);
         Ok(())
     }
 

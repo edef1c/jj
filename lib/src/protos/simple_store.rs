@@ -52,6 +52,15 @@ pub struct Commit {
     /// Labels for the terms of a conflict.
     #[prost(string, repeated, tag = "10")]
     pub conflict_labels: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Subtree prefixes for the parents, in internal path format
+    /// ('/'-separated components). Either empty or with the same number of
+    /// entries as `parents`. An empty string means the parent's tree is not
+    /// shifted.
+    ///
+    /// The field number is deliberately high to avoid colliding with fields
+    /// added upstream while this feature is out of tree.
+    #[prost(string, repeated, tag = "57")]
+    pub subtree_prefixes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(bytes = "vec", tag = "4")]
     pub change_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(string, tag = "5")]

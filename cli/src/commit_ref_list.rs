@@ -315,6 +315,7 @@ mod tests {
             predecessors: vec![],
             root_tree: Merge::resolved(TreeId::new(vec![])),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: ChangeId::new(vec![]),
             description: String::new(),
             author,

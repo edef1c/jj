@@ -37,6 +37,7 @@ use crate::index::IndexResult;
 use crate::merge::Merge;
 use crate::merged_tree::MergedTree;
 use crate::repo::Repo;
+use crate::repo_path::RepoPathBuf;
 use crate::rewrite::merge_commit_trees;
 use crate::rewrite::merge_commit_trees_no_resolve;
 use crate::signing::SignResult;
@@ -170,6 +171,13 @@ impl Commit {
 
     pub fn change_id(&self) -> &ChangeId {
         &self.data.change_id
+    }
+
+    /// The per-parent subtree prefixes of this commit, which is empty unless
+    /// the commit is a subtree merge. See
+    /// [`backend::Commit::subtree_prefixes`].
+    pub fn subtree_prefixes(&self) -> &[RepoPathBuf] {
+        &self.data.subtree_prefixes
     }
 
     pub fn store_commit(&self) -> &Arc<backend::Commit> {

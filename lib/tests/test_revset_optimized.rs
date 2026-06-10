@@ -204,15 +204,15 @@ fn test_mostly_linear() -> TestResult {
     insta::assert_snapshot!(
         commits.iter().map(|c| format!("{:<2} {}\n", c.description(), c.id())).join(""), @"
        00000000000000000000
-    1  78f823b31f2c4a77030b
-    2  1ba216c17ef680561823
-    3  c2c719328d78654d9f8e
-    4  d6b40f7dfac149c7181c
-    5  c682b87d91a8940f71d5
-    6  456fe15ac6ebfdf56219
-    7  d2bba8ce1ce80751aab5
-    8  536f4a045e558c9927a5
-    9  6ab43bd6d94bdaff491f
+    1  cca4212953ac6b9fe810
+    2  3c9fc8b1fb423d3023e1
+    3  45c858382263a5b9b147
+    4  0878ddb1f169661061dc
+    5  704f3c56cb836a4ea75f
+    6  3a8ac48fba572063f91b
+    7  75090fb3f6628e0dc5fc
+    8  44cf9efe1e5fcc300304
+    9  4e2044483361b4c1fccf
     ");
 
     let commit_ids = commits.iter().map(|c| c.id().clone()).collect_vec();
@@ -259,14 +259,14 @@ fn test_weird_merges() -> TestResult {
     insta::assert_snapshot!(
         commits.iter().map(|c| format!("{:<2} {}\n", c.description(), c.id())).join(""), @"
        00000000000000000000
-    1  78f823b31f2c4a77030b
-    2  1ba216c17ef680561823
-    3  83a7b5b8138c9428d837
-    4  43a3ed8115915cb0ebe0
-    5  aec384ff4d34c039e4db
-    6  d80cec48faa50bf2ac56
-    7  2667f762c099ffcda2f0
-    8  54feb3e8186bc4450be4
+    1  cca4212953ac6b9fe810
+    2  3c9fc8b1fb423d3023e1
+    3  91ed417e320198b3e8f2
+    4  68470dc29da55b064edd
+    5  8c9212146a21e73e509d
+    6  bef4ac2e09e2e59c9f61
+    7  00ddd46d0ff367109960
+    8  796baebe1a0ae2de8741
     ");
 
     let commit_ids = commits.iter().map(|c| c.id().clone()).collect_vec();
@@ -336,15 +336,15 @@ fn test_feature_branches() -> TestResult {
     insta::assert_snapshot!(
         commits.iter().map(|c| format!("{:<2} {}\n", c.description(), c.id())).join(""), @"
        00000000000000000000
-    1  78f823b31f2c4a77030b
-    2  6323cf55a45bcc85315d
-    3  83a7b5b8138c9428d837
-    4  93731ec1a14276206ba7
-    5  c388b47bd72fcfee9e3c
-    6  da751caa45bda2e3d526
-    7  45a86fae2b51ec68f8c0
-    8  9f83496b963cbaf8cb7a
-    9  998a24ecd56446732f55
+    1  cca4212953ac6b9fe810
+    2  799e4abf69d0affa9af2
+    3  91ed417e320198b3e8f2
+    4  e5975289260bf28c9077
+    5  2bb702bbe9e680713a5b
+    6  c3ba7558b6ee3a91a6eb
+    7  f038f738d9a120b21445
+    8  47bef9f077a1871dda87
+    9  e9404e50796251db6a64
     ");
 
     let commit_ids = commits.iter().map(|c| c.id().clone()).collect_vec();
@@ -406,15 +406,15 @@ fn test_rewritten() -> TestResult {
     insta::assert_snapshot!(
         commits.iter().map(|c| format!("{:<2} {}\n", c.description(), c.id())).join(""), @"
        00000000000000000000
-    1  78f823b31f2c4a77030b
-    2  1ba216c17ef680561823
-    3  068410d7a4a5b7052c18
-    4  8ee10ec699f52df8c624
-    5  32bd65d7134884955150
-    2b a7d217f53df0908d3f7a
-    3  c199d1c8c617cf15893f
-    5  5fc1da61558a03f69a8d
-    5  cb81e73e341e59553ff6
+    1  cca4212953ac6b9fe810
+    2  3c9fc8b1fb423d3023e1
+    3  03eab444730b7c14124d
+    4  99f5525414d2b83c42a4
+    5  e1ba13fc9100b5868ca5
+    2b d6f556ba808c11730766
+    3  d9cc621dd88fa7c32feb
+    5  6f821b30df916a01292d
+    5  27c9955e7383bd60a8ec
     ");
 
     let commit_ids = commits.iter().map(|c| c.id().clone()).collect_vec();

@@ -28,6 +28,66 @@ use crate::repo_path::RepoPath;
 use crate::repo_path::RepoPathBuf;
 use crate::store::Store;
 
+/// Per-parent subtree prefixes of a commit.
+///
+/// Either "none" (the common case), or one prefix per parent, where a root
+/// path means that parent's tree is not shifted. A list in which every entry
+/// is the root path is normalized to "none".
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SubtreePrefixes {
+    // If non-empty, at least one entry is a non-root path.
+    prefixes: Vec<RepoPathBuf>,
+}
+
+impl SubtreePrefixes {
+    /// Creates a `SubtreePrefixes` with no prefixes.
+    pub const fn none() -> Self {
+        Self { prefixes: vec![] }
+    }
+
+    /// Creates a `SubtreePrefixes` from one prefix per parent, normalizing a
+    /// list of all-root paths to "none".
+    pub fn from_vec(prefixes: Vec<RepoPathBuf>) -> Self {
+        if prefixes.iter().all(|prefix| prefix.is_root()) {
+            Self::none()
+        } else {
+            Self { prefixes }
+        }
+    }
+
+    /// Returns true if no parent's tree is shifted.
+    pub fn is_none(&self) -> bool {
+        self.prefixes.is_empty()
+    }
+
+    /// Returns the prefix for the parent at `index`. Returns the root path if
+    /// there are no prefixes.
+    pub fn get(&self, index: usize) -> &RepoPath {
+        if self.prefixes.is_empty() {
+            RepoPath::root()
+        } else {
+            &self.prefixes[index]
+        }
+    }
+
+    /// Returns the prefixes as a slice, which is empty if there are no
+    /// prefixes.
+    pub fn as_slice(&self) -> &[RepoPathBuf] {
+        &self.prefixes
+    }
+
+    /// Extracts the underlying normalized `Vec<RepoPathBuf>`.
+    pub fn into_vec(self) -> Vec<RepoPathBuf> {
+        self.prefixes
+    }
+
+    /// Returns true if the prefixes can apply to a commit with `num_parents`
+    /// parents.
+    pub fn is_valid_for_parents(&self, num_parents: usize) -> bool {
+        self.prefixes.is_empty() || self.prefixes.len() == num_parents
+    }
+}
+
 /// Returns tree ids in which each term of `tree_ids` appears grafted under
 /// `prefix`, by wrapping it in synthetic single-entry ancestor trees.
 ///

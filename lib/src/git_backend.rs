@@ -93,6 +93,7 @@ use crate::stacked_table::ReadonlyTable;
 use crate::stacked_table::TableSegment as _;
 use crate::stacked_table::TableStore;
 use crate::stacked_table::TableStoreError;
+use crate::subtree::SubtreePrefixes;
 
 const HASH_LENGTH: usize = 20;
 const CHANGE_ID_LENGTH: usize = 16;
@@ -103,6 +104,7 @@ pub const JJ_CONFLICT_README_FILE_NAME: &str = "JJ-CONFLICT-README";
 
 pub const JJ_TREES_COMMIT_HEADER: &str = "jj:trees";
 pub const JJ_CONFLICT_LABELS_COMMIT_HEADER: &str = "jj:conflict-labels";
+pub const JJ_SUBTREE_PREFIXES_COMMIT_HEADER: &str = "jj:subtree-prefixes";
 pub const CHANGE_ID_COMMIT_HEADER: &str = "change-id";
 
 #[derive(Debug, Error)]
@@ -613,6 +615,70 @@ fn extract_root_tree_from_commit(commit: &gix::objs::CommitRef) -> Result<Merge<
     Ok(Merge::from_vec(tree_ids))
 }
 
+/// Encodes a subtree prefix as a term of the `jj:subtree-prefixes` header.
+///
+/// The term is `/` followed by the percent-encoded internal path string, so
+/// that the root path is representable and terms are unambiguously separated
+/// by single spaces.
+fn encode_subtree_prefix(path: &RepoPath) -> String {
+    let mut encoded = "/".to_owned();
+    for ch in path.as_internal_file_string().chars() {
+        match ch {
+            '%' | ' ' | '\x00'..='\x1f' | '\x7f' => {
+                encoded.push_str(&format!("%{:02X}", u32::from(ch)));
+            }
+            _ => encoded.push(ch),
+        }
+    }
+    encoded
+}
+
+/// Decodes the percent-encoded part of a term of the `jj:subtree-prefixes`
+/// header (without the leading `/`).
+fn decode_subtree_prefix(encoded: &[u8]) -> Result<String, ()> {
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut i = 0;
+    while i < encoded.len() {
+        match encoded[i] {
+            b'%' => {
+                let hex = encoded.get(i + 1..i + 3).ok_or(())?;
+                let hex = str::from_utf8(hex).map_err(|_| ())?;
+                bytes.push(u8::from_str_radix(hex, 16).map_err(|_| ())?);
+                i += 3;
+            }
+            byte => {
+                bytes.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| ())
+}
+
+/// Parses the `jj:subtree-prefixes` header value if present.
+fn extract_subtree_prefixes_from_commit(
+    commit: &gix::objs::CommitRef,
+    num_parents: usize,
+) -> Result<Vec<RepoPathBuf>, ()> {
+    let Some(value) = commit
+        .extra_headers()
+        .find(JJ_SUBTREE_PREFIXES_COMMIT_HEADER)
+    else {
+        return Ok(vec![]);
+    };
+
+    let mut prefixes = Vec::new();
+    for term in value.split(|b| *b == b' ') {
+        let encoded = term.strip_prefix(b"/").ok_or(())?;
+        let path = decode_subtree_prefix(encoded)?;
+        prefixes.push(RepoPathBuf::from_internal_string(path).map_err(|_| ())?);
+    }
+    if prefixes.len() != num_parents {
+        return Err(());
+    }
+    Ok(SubtreePrefixes::from_vec(prefixes).into_vec())
+}
+
 fn commit_from_git_without_root_parent(
     id: &CommitId,
     git_object: &gix::Object,
@@ -642,6 +708,16 @@ fn commit_from_git_without_root_parent(
     // If the commit is a conflict, the conflict labels are stored in a commit
     // header separately from the trees.
     let conflict_labels = extract_conflict_labels_from_commit(&commit);
+    let subtree_prefixes = if is_shallow {
+        // The parents are discarded above, so any recorded subtree prefixes
+        // cannot apply to them.
+        vec![]
+    } else {
+        // A commit whose only parent is the root commit has no Git parents,
+        // but its prefixes (if any) still have one entry.
+        extract_subtree_prefixes_from_commit(&commit, parents.len().max(1))
+            .map_err(|()| to_read_object_err("Invalid jj:subtree-prefixes header", id))?
+    };
     // Conflicted commits written before we started using the `jj:trees` header
     // (~March 2024) may have the root trees stored in the extra metadata table
     // instead. For such commits, we'll update the root tree later when we read the
@@ -681,6 +757,7 @@ fn commit_from_git_without_root_parent(
         // If this commit has associated extra metadata, we may reset this later.
         root_tree,
         conflict_labels,
+        subtree_prefixes,
         change_id,
         description,
         author,
@@ -1307,6 +1384,15 @@ impl Backend for GitBackend {
         if !tree_ids.is_resolved() {
             let value = tree_ids.iter().map(|id| id.hex()).join(" ");
             extra_headers.push((JJ_TREES_COMMIT_HEADER.into(), value.into()));
+        }
+        if !contents.subtree_prefixes.is_empty() {
+            assert_eq!(contents.subtree_prefixes.len(), contents.parents.len());
+            let value = contents
+                .subtree_prefixes
+                .iter()
+                .map(|prefix| encode_subtree_prefix(prefix))
+                .join(" ");
+            extra_headers.push((JJ_SUBTREE_PREFIXES_COMMIT_HEADER.into(), value.into()));
         }
         if self.write_change_id_header {
             extra_headers.push((
@@ -1967,6 +2053,7 @@ mod tests {
             predecessors: vec![],
             root_tree: Merge::resolved(backend.empty_tree_id().clone()),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: original_change_id.clone(),
             description: "initial".to_string(),
             author: create_signature(),
@@ -1993,6 +2080,88 @@ mod tests {
         assert_eq!(
             no_extra_commit.change_id, original_change_id,
             "The change-id header did not roundtrip"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn subtree_prefix_term_encoding() {
+        let path = |s: &str| RepoPathBuf::from_internal_string(s).unwrap();
+        assert_eq!(encode_subtree_prefix(RepoPath::root()), "/");
+        assert_eq!(encode_subtree_prefix(&path("vendor/lib")), "/vendor/lib");
+        assert_eq!(encode_subtree_prefix(&path("a b/c%d")), "/a%20b/c%25d");
+        assert_eq!(encode_subtree_prefix(&path("a\nb")), "/a%0Ab");
+        assert_eq!(encode_subtree_prefix(&path("ünïcode")), "/ünïcode");
+        for value in ["vendor/lib", "a b/c%d", "a\nb", "ünïcode"] {
+            let encoded = encode_subtree_prefix(&path(value));
+            assert_eq!(
+                decode_subtree_prefix(&encoded.as_bytes()[1..]).unwrap(),
+                value
+            );
+        }
+        // Truncated and invalid escapes
+        assert!(decode_subtree_prefix(b"a%2").is_err());
+        assert!(decode_subtree_prefix(b"a%zz").is_err());
+    }
+
+    #[test]
+    fn round_trip_subtree_prefixes_via_git_header() -> TestResult {
+        let settings = user_settings();
+        let temp_dir = new_temp_dir();
+
+        let store_path = temp_dir.path().join("store");
+        fs::create_dir(&store_path)?;
+        let empty_store_path = temp_dir.path().join("empty_store");
+        fs::create_dir(&empty_store_path)?;
+        let git_repo_path = temp_dir.path().join("git");
+        let git_repo = git_init(git_repo_path);
+
+        let backend = GitBackend::init_external(&settings, &store_path, git_repo.path())?;
+        let commit_a = Commit {
+            parents: vec![backend.root_commit_id().clone()],
+            predecessors: vec![],
+            root_tree: Merge::resolved(backend.empty_tree_id().clone()),
+            conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
+            change_id: ChangeId::from_hex("1111eeee1111eeee1111eeee1111eeee"),
+            description: "a".to_string(),
+            author: create_signature(),
+            committer: create_signature(),
+            secure_sig: None,
+        };
+        let mut commit_b = commit_a.clone();
+        commit_b.change_id = ChangeId::from_hex("2222eeee2222eeee2222eeee2222eeee");
+        commit_b.description = "b".to_string();
+        let (id_a, _) = backend.write_commit(commit_a.clone(), None).block_on()?;
+        let (id_b, _) = backend.write_commit(commit_b, None).block_on()?;
+
+        let original_prefixes = vec![
+            RepoPathBuf::root(),
+            RepoPathBuf::from_internal_string("vendor/my lib").unwrap(),
+        ];
+        let merge_commit = Commit {
+            parents: vec![id_a.clone(), id_b.clone()],
+            subtree_prefixes: original_prefixes.clone(),
+            change_id: ChangeId::from_hex("3333eeee3333eeee3333eeee3333eeee"),
+            description: "merge".to_string(),
+            ..commit_a
+        };
+        let (merge_id, _) = backend.write_commit(merge_commit, None).block_on()?;
+
+        let commit = backend.read_commit(&merge_id).block_on()?;
+        assert_eq!(
+            commit.subtree_prefixes, original_prefixes,
+            "The jj:subtree-prefixes header did not roundtrip"
+        );
+
+        // Read through a store without the extra proto files to ensure the
+        // prefixes are derived from the git commit header alone.
+        let no_extra_backend =
+            GitBackend::init_external(&settings, &empty_store_path, git_repo.path())?;
+        let no_extra_commit = no_extra_backend.read_commit(&merge_id).block_on()?;
+        assert_eq!(
+            no_extra_commit.subtree_prefixes, original_prefixes,
+            "The jj:subtree-prefixes header did not roundtrip"
         );
         Ok(())
     }
@@ -2058,6 +2227,7 @@ mod tests {
             predecessors: vec![],
             root_tree: Merge::resolved(backend.empty_tree_id().clone()),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: ChangeId::from_hex("abc123"),
             description: "".to_string(),
             author: create_signature(),
@@ -2146,6 +2316,7 @@ mod tests {
             predecessors: vec![],
             root_tree: root_tree.clone(),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: ChangeId::from_hex("abc123"),
             description: "".to_string(),
             author: create_signature(),
@@ -2251,6 +2422,7 @@ mod tests {
             predecessors: vec![],
             root_tree: Merge::resolved(backend.empty_tree_id().clone()),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: ChangeId::new(vec![42; 16]),
             description: "initial".to_string(),
             author: signature.clone(),
@@ -2326,6 +2498,7 @@ mod tests {
             predecessors: vec![],
             root_tree: Merge::resolved(backend.empty_tree_id().clone()),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: ChangeId::from_hex("7f0a7ce70354b22efcccf7bf144017c4"),
             description: "initial".to_string(),
             author: create_signature(),
@@ -2367,6 +2540,7 @@ mod tests {
             predecessors: vec![],
             root_tree: Merge::resolved(backend.empty_tree_id().clone()),
             conflict_labels: Merge::resolved(String::new()),
+            subtree_prefixes: vec![],
             change_id: ChangeId::new(vec![42; 16]),
             description: "initial".to_string(),
             author: create_signature(),

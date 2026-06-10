@@ -28,6 +28,7 @@ use pollster::FutureExt as _;
 
 use crate::backend;
 use crate::backend::Backend;
+use crate::backend::BackendError;
 use crate::backend::BackendResult;
 use crate::backend::ChangeId;
 use crate::backend::CommitId;
@@ -177,6 +178,20 @@ impl Store {
         sign_with: Option<&mut SigningFn<'_>>,
     ) -> BackendResult<Commit> {
         assert!(!commit.parents.is_empty());
+        if !commit.subtree_prefixes.is_empty()
+            && commit.subtree_prefixes.len() != commit.parents.len()
+        {
+            return Err(BackendError::Other(
+                format!(
+                    "Cannot write commit with {} subtree prefixes and {} parents; a subtree \
+                     merge must have exactly one prefix per parent (consider recreating the \
+                     merge with `jj new --subtree`)",
+                    commit.subtree_prefixes.len(),
+                    commit.parents.len(),
+                )
+                .into(),
+            ));
+        }
 
         let (commit_id, commit) = self.backend.write_commit(commit, sign_with).await?;
         let data = Arc::new(commit);

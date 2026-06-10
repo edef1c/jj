@@ -681,6 +681,7 @@ pub fn commit_with_tree(store: &Arc<Store>, tree: MergedTree) -> Commit {
         predecessors: vec![],
         root_tree,
         conflict_labels: conflict_labels.into_merge(),
+        subtree_prefixes: vec![],
         change_id: ChangeId::from_hex("abcd"),
         description: "description".to_string(),
         author: signature.clone(),

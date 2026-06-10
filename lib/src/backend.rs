@@ -203,6 +203,14 @@ pub struct Commit {
     /// terms as `root_tree`.
     #[serde(skip)]
     pub conflict_labels: Merge<String>,
+    /// Subtree prefixes for the parents of this commit. Either empty (the
+    /// common case), or has exactly one entry per parent, where an entry of
+    /// `RepoPathBuf::root()` means that parent's tree is not shifted. If
+    /// non-empty, at least one entry is a non-root path. A non-root entry
+    /// means the parent's tree is considered grafted at that directory for
+    /// the purpose of computing the merged parent tree (a "subtree merge").
+    #[serde(skip)]
+    pub subtree_prefixes: Vec<RepoPathBuf>,
     /// The change ID of this commit. This is a stable identifier that follows
     /// the commit when it's rewritten.
     pub change_id: ChangeId,
@@ -525,6 +533,7 @@ pub fn make_root_commit(root_change_id: ChangeId, empty_tree_id: TreeId) -> Comm
         predecessors: vec![],
         root_tree: Merge::resolved(empty_tree_id),
         conflict_labels: Merge::resolved(String::new()),
+        subtree_prefixes: vec![],
         change_id: root_change_id,
         description: String::new(),
         author: signature.clone(),

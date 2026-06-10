@@ -46,6 +46,14 @@ message Commit {
   repeated bytes root_tree = 3;
   // Labels for the terms of a conflict.
   repeated string conflict_labels = 10;
+  // Subtree prefixes for the parents, in internal path format
+  // ('/'-separated components). Either empty or with the same number of
+  // entries as `parents`. An empty string means the parent's tree is not
+  // shifted.
+  //
+  // The field number is deliberately high to avoid colliding with fields
+  // added upstream while this feature is out of tree.
+  repeated string subtree_prefixes = 57;
   bytes change_id = 4;
   string description = 5;
 
