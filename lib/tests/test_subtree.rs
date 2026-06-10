@@ -14,12 +14,16 @@
 
 use jj_lib::merge::Merge;
 use jj_lib::repo::Repo as _;
+use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::subtree::SubtreeShift;
 use jj_lib::subtree::graft_tree_at_prefix;
 use pollster::FutureExt as _;
+use testutils::CommitBuilderExt as _;
 use testutils::TestRepo;
 use testutils::TestResult;
+use testutils::assert_tree_eq;
 use testutils::create_single_tree;
+use testutils::create_tree;
 use testutils::repo_path;
 use testutils::repo_path_buf;
 
@@ -124,6 +128,197 @@ fn test_graft_conflicted_tree() -> TestResult {
             expected_right.id().clone(),
         ])
     );
+    Ok(())
+}
+
+#[test]
+fn test_subtree_merge_parent_tree() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    // Trunk and lib are unrelated histories.
+    let trunk_tree = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk\n"),
+            (repo_path("src/main.rs"), "fn main() {}\n"),
+        ],
+    );
+    let lib_tree = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "lib\n"),
+            (repo_path("lib.rs"), "pub fn f() {}\n"),
+        ],
+    );
+
+    let mut tx = repo.start_transaction();
+    let trunk = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], trunk_tree)
+        .write_unwrap();
+    let lib = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], lib_tree)
+        .write_unwrap();
+
+    let prefixes = vec![repo_path_buf(""), repo_path_buf("vendor/lib")];
+    let merged_tree =
+        merge_commit_trees(tx.repo_mut(), &[trunk.clone(), lib.clone()], &prefixes).block_on()?;
+    // The lib files appear under the prefix; the colliding root README
+    // doesn't conflict because the lib tree is grafted.
+    let expected = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk\n"),
+            (repo_path("src/main.rs"), "fn main() {}\n"),
+            (repo_path("vendor/lib/README"), "lib\n"),
+            (repo_path("vendor/lib/lib.rs"), "pub fn f() {}\n"),
+        ],
+    );
+    assert_tree_eq!(&merged_tree, &expected);
+
+    // A merge commit recording the prefixes reports the same parent tree and
+    // is considered empty.
+    let merge_commit = tx
+        .repo_mut()
+        .new_commit(
+            vec![trunk.id().clone(), lib.id().clone()],
+            merged_tree.clone(),
+        )
+        .set_subtree_prefixes(prefixes)
+        .write_unwrap();
+    assert_eq!(
+        merge_commit.subtree_prefixes(),
+        &[repo_path_buf(""), repo_path_buf("vendor/lib")]
+    );
+    let parent_tree = merge_commit.parent_tree(tx.repo_mut()).block_on()?;
+    assert_tree_eq!(&parent_tree, &expected);
+    assert!(merge_commit.is_empty(tx.repo_mut()).block_on()?);
+    Ok(())
+}
+
+#[test]
+fn test_subtree_merge_single_parent() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    let lib_tree = create_tree(repo, &[(repo_path("lib.rs"), "lib\n")]);
+    let mut tx = repo.start_transaction();
+    let lib = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], lib_tree)
+        .write_unwrap();
+
+    let merged_tree =
+        merge_commit_trees(tx.repo_mut(), &[lib], &[repo_path_buf("sub")]).block_on()?;
+    let expected = create_tree(repo, &[(repo_path("sub/lib.rs"), "lib\n")]);
+    assert_tree_eq!(&merged_tree, &expected);
+    Ok(())
+}
+
+#[test]
+fn test_subtree_merge_second_pull() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    let trunk_tree = create_tree(repo, &[(repo_path("README"), "trunk\n")]);
+    let lib1_tree = create_tree(
+        repo,
+        &[
+            (repo_path("lib.rs"), "v1\n"),
+            (repo_path("old-name.rs"), "moves\n"),
+        ],
+    );
+
+    let mut tx = repo.start_transaction();
+    let trunk = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], trunk_tree)
+        .write_unwrap();
+    let lib1 = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], lib1_tree)
+        .write_unwrap();
+
+    let prefixes = vec![repo_path_buf(""), repo_path_buf("vendor/lib")];
+    let merge1_tree =
+        merge_commit_trees(tx.repo_mut(), &[trunk.clone(), lib1.clone()], &prefixes).block_on()?;
+    let merge1 = tx
+        .repo_mut()
+        .new_commit(
+            vec![trunk.id().clone(), lib1.id().clone()],
+            merge1_tree.clone(),
+        )
+        .set_subtree_prefixes(prefixes.clone())
+        .write_unwrap();
+
+    // Trunk advances on top of the merge.
+    let trunk2_tree = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk v2\n"),
+            (repo_path("vendor/lib/lib.rs"), "v1\n"),
+            (repo_path("vendor/lib/old-name.rs"), "moves\n"),
+        ],
+    );
+    let trunk2 = tx
+        .repo_mut()
+        .new_commit(vec![merge1.id().clone()], trunk2_tree)
+        .write_unwrap();
+
+    // Lib advances upstream: modifies a file and renames another.
+    let lib2_tree = create_tree(
+        repo,
+        &[
+            (repo_path("lib.rs"), "v2\n"),
+            (repo_path("new-name.rs"), "moves\n"),
+        ],
+    );
+    let lib2 = tx
+        .repo_mut()
+        .new_commit(vec![lib1.id().clone()], lib2_tree)
+        .write_unwrap();
+
+    // Pulling the new lib version into trunk merges cleanly: the merge base
+    // is lib1 grafted at the prefix.
+    let merge2_tree =
+        merge_commit_trees(tx.repo_mut(), &[trunk2.clone(), lib2.clone()], &prefixes).block_on()?;
+    let expected = create_tree(
+        repo,
+        &[
+            (repo_path("README"), "trunk v2\n"),
+            (repo_path("vendor/lib/lib.rs"), "v2\n"),
+            (repo_path("vendor/lib/new-name.rs"), "moves\n"),
+        ],
+    );
+    assert_tree_eq!(&merge2_tree, &expected);
+    Ok(())
+}
+
+#[test]
+fn test_subtree_merge_prefix_collides_with_file() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    // Trunk has a *file* at the path the lib tree is grafted at.
+    let trunk_tree = create_tree(repo, &[(repo_path("vendor/lib"), "file in the way\n")]);
+    let lib_tree = create_tree(repo, &[(repo_path("lib.rs"), "lib\n")]);
+
+    let mut tx = repo.start_transaction();
+    let trunk = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], trunk_tree)
+        .write_unwrap();
+    let lib = tx
+        .repo_mut()
+        .new_commit(vec![repo.store().root_commit_id().clone()], lib_tree)
+        .write_unwrap();
+
+    let prefixes = vec![repo_path_buf(""), repo_path_buf("vendor/lib")];
+    let merged_tree = merge_commit_trees(tx.repo_mut(), &[trunk, lib], &prefixes).block_on()?;
+    // The file-vs-directory clash surfaces as a conflict.
+    assert!(!merged_tree.tree_ids().is_resolved());
     Ok(())
 }
 

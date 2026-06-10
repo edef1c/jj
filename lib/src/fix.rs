@@ -240,7 +240,19 @@ pub async fn fix_files(
             let base_commit = repo_mut.store().get_commit_async(base_commit_id).await?;
             base_commits.push(base_commit);
         }
-        let base_tree = merge_commit_trees(repo_mut, &base_commits).await?;
+        // The base commits are usually the commit's parents, in which case
+        // its subtree prefixes (if any) apply positionally. If ancestors were
+        // substituted for parents that are also being fixed, the bases no
+        // longer correspond to the parents, so the prefixes cannot be
+        // applied.
+        // TODO: Track prefixes through the base-commit substitution.
+        let base_prefixes: &[RepoPathBuf] = if base_commit_ids.iter().eq(commit.parent_ids().iter())
+        {
+            commit.subtree_prefixes()
+        } else {
+            &[]
+        };
+        let base_tree = merge_commit_trees(repo_mut, &base_commits, base_prefixes).await?;
 
         // If --include-unchanged-files, we always fix every matching file in the tree.
         // Otherwise, we fix the matching changed files in this commit, plus any that

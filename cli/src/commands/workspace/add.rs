@@ -208,7 +208,7 @@ pub async fn cmd_workspace_add(
         .await?
     };
 
-    let tree = merge_commit_trees(tx.repo(), &parents).await?;
+    let tree = merge_commit_trees(tx.repo(), &parents, &[]).await?;
     let parent_ids = parents.iter().ids().cloned().collect_vec();
     let mut commit_builder = tx.repo_mut().new_commit(parent_ids, tree).detach();
     let mut description = join_message_paragraphs(&args.message_paragraphs);

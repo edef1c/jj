@@ -181,8 +181,8 @@ pub(crate) async fn cmd_diff(
             .flatten()
             .collect();
         let parents = parents.into_iter().collect_vec();
-        from_tree = merge_commit_trees(repo.as_ref(), &parents).await?;
-        to_tree = merge_commit_trees(repo.as_ref(), &heads).await?;
+        from_tree = merge_commit_trees(repo.as_ref(), &parents, &[]).await?;
+        to_tree = merge_commit_trees(repo.as_ref(), &heads, &[]).await?;
 
         for p in &parents {
             for to in &heads {

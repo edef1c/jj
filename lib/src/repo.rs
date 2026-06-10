@@ -1223,7 +1223,7 @@ impl MutableRepo {
                     .iter()
                     .map(async |id| self.store().get_commit_async(id).await);
                 let new_commits = try_join_all(new_commit_futures).await?;
-                let merged_parents_tree = merge_commit_trees(self, &new_commits).await?;
+                let merged_parents_tree = merge_commit_trees(self, &new_commits, &[]).await?;
                 let commit = self
                     .new_commit(new_commit_ids.clone(), merged_parents_tree)
                     .write()

@@ -1337,8 +1337,12 @@ fn test_snapshot_modified_materialized_conflict(
     test_workspace.repo = tx.commit("create parent commits").block_on()?;
 
     // Create the merge commit.
-    let tree =
-        merge_commit_trees(&*test_workspace.repo, &[parent1_commit, parent2_commit]).block_on()?;
+    let tree = merge_commit_trees(
+        &*test_workspace.repo,
+        &[parent1_commit, parent2_commit],
+        &[],
+    )
+    .block_on()?;
     let merge_commit = commit_with_tree(test_workspace.repo.store(), tree);
 
     // Checkout the merge commit.

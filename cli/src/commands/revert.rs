@@ -151,7 +151,7 @@ pub(crate) async fn cmd_revert(
             .map(|id| tx.repo().store().get_commit_async(id)),
     )
     .await?;
-    let mut new_base_tree = merge_commit_trees(tx.repo(), &new_parents).await?;
+    let mut new_base_tree = merge_commit_trees(tx.repo(), &new_parents, &[]).await?;
     let mut parent_ids = new_parent_ids;
     let mut parent_labels = conflict_label_for_commits(&new_parents);
 

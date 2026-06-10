@@ -98,7 +98,7 @@ pub(crate) async fn cmd_diffedit(
     let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
     let matcher = fileset_expression.to_matcher();
 
-    let (target_commit, base_commits, diff_description);
+    let (target_commit, base_commits, base_prefixes, diff_description);
     if args.from.is_some() || args.to.is_some() {
         target_commit = workspace_command
             .resolve_single_rev(ui, args.to.as_ref().unwrap_or(&RevisionArg::AT))
@@ -108,6 +108,7 @@ pub(crate) async fn cmd_diffedit(
                 .resolve_single_rev(ui, args.from.as_ref().unwrap_or(&RevisionArg::AT))
                 .await?,
         ];
+        base_prefixes = vec![];
         diff_description = format!(
             "The diff initially shows the commit's changes relative to:\n{}",
             workspace_command.format_commit_summary(&base_commits[0])
@@ -117,6 +118,8 @@ pub(crate) async fn cmd_diffedit(
             .resolve_single_rev(ui, args.revision.as_ref().unwrap_or(&RevisionArg::AT))
             .await?;
         base_commits = target_commit.parents().await?;
+        // The bases are the commit's parents, so its subtree prefixes apply.
+        base_prefixes = target_commit.subtree_prefixes().to_vec();
         diff_description = "The diff initially shows the commit's changes.".to_string();
     }
     workspace_command
@@ -137,7 +140,7 @@ don't make any changes, then the operation will be aborted.",
             tx.format_commit_summary(&target_commit),
         )
     };
-    let base_tree = merge_commit_trees(tx.repo(), base_commits.as_slice()).await?;
+    let base_tree = merge_commit_trees(tx.repo(), base_commits.as_slice(), &base_prefixes).await?;
     let tree = target_commit.tree();
     let edited_tree = diff_editor
         .edit(Diff::new(&base_tree, &tree), &matcher, format_instructions)

@@ -245,9 +245,13 @@ fn create_conflict_snapshot_and_read(extra_setting: &str) -> Vec<u8> {
     // Reload the repo to pick up the new commits.
     test_workspace.repo = test_workspace.repo.reload_at_head().block_on().unwrap();
     // Create the merge commit.
-    let tree = merge_commit_trees(&*test_workspace.repo, &[parent1_commit, parent2_commit])
-        .block_on()
-        .unwrap();
+    let tree = merge_commit_trees(
+        &*test_workspace.repo,
+        &[parent1_commit, parent2_commit],
+        &[],
+    )
+    .block_on()
+    .unwrap();
     let merge_commit = commit_with_tree(test_workspace.repo.store(), tree);
     // Append new texts to the file with conflicts to make sure the last line is not
     // conflict markers.
@@ -433,8 +437,12 @@ fn test_eol_conversion_update_conflicts(
     // Reload the repo to pick up the new commits.
     test_workspace.repo = test_workspace.repo.reload_at_head().block_on()?;
     // Create the merge commit.
-    let tree =
-        merge_commit_trees(&*test_workspace.repo, &[parent1_commit, parent2_commit]).block_on()?;
+    let tree = merge_commit_trees(
+        &*test_workspace.repo,
+        &[parent1_commit, parent2_commit],
+        &[],
+    )
+    .block_on()?;
     let merge_commit = commit_with_tree(test_workspace.repo.store(), tree);
 
     // Checkout the merge commit.

@@ -110,7 +110,7 @@ fn test_merge_criss_cross() -> TestResult {
         tree_e.clone(),
     );
     let merged =
-        merge_commit_trees(tx.repo_mut(), &[commit_d.clone(), commit_e.clone()]).block_on()?;
+        merge_commit_trees(tx.repo_mut(), &[commit_d.clone(), commit_e.clone()], &[]).block_on()?;
     assert_tree_eq!(merged, tree_expected);
 
     let tree_unresolved_expected = MergedTree::merge_no_resolve(Merge::from_vec(vec![
@@ -121,7 +121,7 @@ fn test_merge_criss_cross() -> TestResult {
         (tree_e, commit_e.conflict_label()),
     ]));
     let unresolved_merged =
-        merge_commit_trees_no_resolve(tx.repo_mut(), &[commit_d, commit_e]).block_on()?;
+        merge_commit_trees_no_resolve(tx.repo_mut(), &[commit_d, commit_e], &[]).block_on()?;
     assert_tree_eq!(unresolved_merged, tree_unresolved_expected);
     assert_tree_eq!(unresolved_merged.resolve().block_on()?, tree_expected);
 

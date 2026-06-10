@@ -48,7 +48,9 @@ use crate::rewrite::merge_commit_trees_no_resolve_without_repo;
 use crate::tree_merge::resolve_file_values;
 
 /// Current format version of the changed-path index segment file.
-const FILE_FORMAT_VERSION: u32 = 0;
+// Version 1: changed paths of subtree merges are computed against the
+// prefix-aware parent tree.
+const FILE_FORMAT_VERSION: u32 = 1;
 
 id_type!(pub(super) ChangedPathIndexSegmentId { hex() });
 
@@ -569,6 +571,7 @@ pub(super) async fn collect_changed_paths(
 ) -> BackendResult<Vec<RepoPathBuf>> {
     let parents = commit.parents().await?;
     if let [p] = parents.as_slice()
+        && commit.subtree_prefixes().is_empty()
         && commit.tree_ids() == p.tree_ids()
     {
         return Ok(vec![]);
@@ -577,7 +580,13 @@ pub(super) async fn collect_changed_paths(
     // even if we have to visit all files.
     tracing::trace!(?commit, parents_count = parents.len(), "calculating diffs");
     let store = commit.store();
-    let from_tree = merge_commit_trees_no_resolve_without_repo(store, index, &parents).await?;
+    let from_tree = merge_commit_trees_no_resolve_without_repo(
+        store,
+        index,
+        &parents,
+        commit.subtree_prefixes(),
+    )
+    .await?;
     let to_tree = commit.tree();
     let tree_diff = from_tree.diff_stream(&to_tree, &EverythingMatcher);
     let paths = tree_diff

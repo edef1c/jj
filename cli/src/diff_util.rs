@@ -77,6 +77,7 @@ use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::rewrite::rebase_to_dest_parent;
 use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
+use jj_lib::subtree::SubtreeShift;
 use thiserror::Error;
 use tracing::instrument;
 use unicode_width::UnicodeWidthStr as _;
@@ -666,12 +667,7 @@ impl<'a> DiffRenderer<'a> {
     ) -> Result<(), DiffRenderError> {
         let from_tree = commit.parent_tree(self.repo).await?;
         let to_tree = commit.tree();
-        let mut copy_records = CopyRecords::default();
-        for parent_id in commit.parent_ids() {
-            let records =
-                get_copy_records(self.repo.store(), parent_id, commit.id(), matcher).await?;
-            copy_records.add_records(records);
-        }
+        let copy_records = get_copy_records_for_parents(self.repo.store(), commit, matcher).await?;
         self.show_diff(
             ui,
             formatter,
@@ -697,6 +693,41 @@ pub async fn get_copy_records(
         .try_filter(|record| future::ready(matcher.matches(&record.target)))
         .try_collect()
         .await
+}
+
+/// Collects the copy records of `commit` relative to its parents, for use
+/// with the merged parent tree computed by [`Commit::parent_tree()`].
+///
+/// The records are produced in the parents' own coordinates, so the source
+/// paths of records from a subtree-merged parent are translated by that
+/// parent's prefix; otherwise the whole grafted tree would render as renamed
+/// from the parent's root-relative paths.
+pub async fn get_copy_records_for_parents(
+    store: &Store,
+    commit: &Commit,
+    matcher: &dyn Matcher,
+) -> BackendResult<CopyRecords> {
+    let mut copy_records = CopyRecords::default();
+    for (i, parent_id) in commit.parent_ids().iter().enumerate() {
+        let records = get_copy_records(store, parent_id, commit.id(), matcher).await?;
+        let records = match commit.subtree_prefixes().get(i).filter(|p| !p.is_root()) {
+            None => records,
+            Some(prefix) => {
+                let shift = SubtreeShift::GraftAt(prefix.clone());
+                records
+                    .into_iter()
+                    .filter_map(|mut record| {
+                        record.source = shift.apply_to_path(&record.source)?;
+                        // A record that maps a path to itself carries no
+                        // information (and would render as a self-copy).
+                        (record.source != record.target).then_some(record)
+                    })
+                    .collect()
+            }
+        };
+        copy_records.add_records(records);
+    }
+    Ok(copy_records)
 }
 
 /// How conflicts are processed and rendered in diffs.

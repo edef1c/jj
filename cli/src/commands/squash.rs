@@ -270,7 +270,7 @@ pub(crate) async fn cmd_squash(
                 .get_commit_async(commit_id)
         }))
         .await?;
-        let merged_tree = merge_commit_trees(tx.repo(), &parent_commits).await?;
+        let merged_tree = merge_commit_trees(tx.repo(), &parent_commits, &[]).await?;
         let commit = tx
             .repo_mut()
             .new_commit(parent_ids.clone(), merged_tree)

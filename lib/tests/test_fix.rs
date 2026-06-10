@@ -1084,6 +1084,7 @@ fn test_fix_conflicted_base_commit() -> TestResult {
     let c4_tree = merge_commit_trees(
         tx.repo_mut(),
         &[repo.store().get_commit(&c2)?, repo.store().get_commit(&c3)?],
+        &[],
     )
     .block_on()?;
     let c4 = create_commit(&mut tx, vec![c2.clone(), c3.clone()], c4_tree);
@@ -1146,6 +1147,7 @@ fn test_fix_conflicted_current_commit() -> TestResult {
             repo.store().get_commit(&c2_left)?,
             repo.store().get_commit(&c2_right)?,
         ],
+        &[],
     )
     .block_on()?;
     let c2 = create_commit(&mut tx, vec![c2_left.clone(), c2_right.clone()], c2_tree);

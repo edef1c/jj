@@ -50,17 +50,48 @@ use crate::merged_tree_builder::MergedTreeBuilder;
 use crate::repo::MutableRepo;
 use crate::repo::Repo;
 use crate::repo_path::RepoPath;
+use crate::repo_path::RepoPathBuf;
 use crate::revset::RevsetExpression;
 use crate::revset::RevsetStreamExt as _;
 use crate::store::Store;
+use crate::subtree::graft_merged_tree;
+
+/// Returns the tree of `commit` grafted at `prefix`, with the commit's
+/// conflict labels preserved.
+async fn grafted_commit_tree(commit: &Commit, prefix: &RepoPath) -> BackendResult<MergedTree> {
+    graft_merged_tree(&commit.tree(), prefix).await
+}
+
+/// The conflict label for a term of a merge, mentioning the subtree prefix
+/// the term's tree is grafted at, if any.
+fn conflict_label_with_prefix(commit: &Commit, prefix: &RepoPath) -> String {
+    if prefix.is_root() {
+        commit.conflict_label()
+    } else {
+        format!(
+            "{} (subtree {})",
+            commit.conflict_label(),
+            prefix.as_internal_file_string()
+        )
+    }
+}
 
 /// Merges `commits` and tries to resolve any conflicts recursively.
+///
+/// `prefixes` is either empty or contains one subtree prefix per commit; a
+/// commit with a non-root prefix contributes its tree grafted at that
+/// directory. When merging the parents of a commit, pass
+/// [`Commit::subtree_prefixes()`] so that subtree merges are honored.
 #[instrument(skip(repo))]
-pub async fn merge_commit_trees(repo: &dyn Repo, commits: &[Commit]) -> BackendResult<MergedTree> {
+pub async fn merge_commit_trees(
+    repo: &dyn Repo,
+    commits: &[Commit],
+    prefixes: &[RepoPathBuf],
+) -> BackendResult<MergedTree> {
     if let [commit] = commits {
-        Ok(commit.tree())
+        grafted_commit_tree(commit, prefix_for_commit(prefixes, 0)).await
     } else {
-        merge_commit_trees_no_resolve(repo, commits)
+        merge_commit_trees_no_resolve(repo, commits, prefixes)
             .await?
             .resolve()
             .await
@@ -68,33 +99,54 @@ pub async fn merge_commit_trees(repo: &dyn Repo, commits: &[Commit]) -> BackendR
 }
 
 /// Merges `commits` without attempting to resolve file conflicts.
+///
+/// See [`merge_commit_trees()`] for the meaning of `prefixes`.
 pub async fn merge_commit_trees_no_resolve(
     repo: &dyn Repo,
     commits: &[Commit],
+    prefixes: &[RepoPathBuf],
 ) -> BackendResult<MergedTree> {
     if let [commit] = commits {
-        Ok(commit.tree())
+        grafted_commit_tree(commit, prefix_for_commit(prefixes, 0)).await
     } else {
-        merge_commit_trees_no_resolve_without_repo(repo.store(), repo.index(), commits).await
+        merge_commit_trees_no_resolve_without_repo(repo.store(), repo.index(), commits, prefixes)
+            .await
     }
 }
 
+fn prefix_for_commit(prefixes: &[RepoPathBuf], index: usize) -> &RepoPath {
+    prefixes.get(index).map_or(RepoPath::root(), |p| p)
+}
+
 /// Merges `commits` without attempting to resolve file conflicts.
+///
+/// See [`merge_commit_trees()`] for the meaning of `prefixes`.
 #[instrument(skip(index))]
 pub async fn merge_commit_trees_no_resolve_without_repo(
     store: &Arc<Store>,
     index: &dyn Index,
     commits: &[Commit],
+    prefixes: &[RepoPathBuf],
 ) -> BackendResult<MergedTree> {
-    let commit_ids = commits
+    assert!(prefixes.is_empty() || prefixes.len() == commits.len());
+    let commits_with_prefixes = commits
         .iter()
-        .map(|commit| commit.id().clone())
+        .enumerate()
+        .map(|(i, commit)| {
+            (
+                commit.id().clone(),
+                prefix_for_commit(prefixes, i).to_owned(),
+            )
+        })
         .collect_vec();
-    let commit_id_merge = find_recursive_merge_commits(store, index, commit_ids)?;
+    let commit_id_merge =
+        find_recursive_merge_commits_with_prefixes(store, index, commits_with_prefixes)?;
     let tree_merge: Merge<(MergedTree, String)> = commit_id_merge
-        .try_map_async(async |commit_id| {
+        .try_map_async(async |(commit_id, prefix)| {
             let commit = store.get_commit_async(commit_id).await?;
-            Ok::<_, BackendError>((commit.tree(), commit.conflict_label()))
+            let label = conflict_label_with_prefix(&commit, prefix);
+            let tree = grafted_commit_tree(&commit, prefix).await?;
+            Ok::<_, BackendError>((tree, label))
         })
         .await?;
     Ok(MergedTree::merge_no_resolve(tree_merge))
@@ -104,24 +156,56 @@ pub async fn merge_commit_trees_no_resolve_without_repo(
 pub fn find_recursive_merge_commits(
     store: &Arc<Store>,
     index: &dyn Index,
-    mut commit_ids: Vec<CommitId>,
+    commit_ids: Vec<CommitId>,
 ) -> BackendResult<Merge<CommitId>> {
-    if commit_ids.is_empty() {
-        Ok(Merge::resolved(store.root_commit_id().clone()))
-    } else if commit_ids.len() == 1 {
-        Ok(Merge::resolved(commit_ids.pop().unwrap()))
+    let commits = commit_ids
+        .into_iter()
+        .map(|id| (id, RepoPathBuf::root()))
+        .collect_vec();
+    Ok(find_recursive_merge_commits_with_prefixes(store, index, commits)?.into_map(|(id, _)| id))
+}
+
+/// Find the commits to use as input to the recursive merge algorithm, along
+/// with the subtree prefix to graft each commit's tree at.
+///
+/// The trees of the common ancestors of the accumulated merge result and the
+/// commit being folded in are grafted at that commit's prefix: the
+/// accumulated result is already expressed in root coordinates (with content
+/// from subtree-merged commits located under their prefixes), so the content
+/// shared with the incoming side lives at that side's prefix. If two sides
+/// with *different* non-root prefixes share ancestry, the placement of the
+/// shared content is ambiguous and the incoming (right) side's prefix wins.
+pub fn find_recursive_merge_commits_with_prefixes(
+    store: &Arc<Store>,
+    index: &dyn Index,
+    mut commits: Vec<(CommitId, RepoPathBuf)>,
+) -> BackendResult<Merge<(CommitId, RepoPathBuf)>> {
+    if commits.is_empty() {
+        // The root commit's tree is empty, so its prefix is irrelevant.
+        Ok(Merge::resolved((
+            store.root_commit_id().clone(),
+            RepoPathBuf::root(),
+        )))
+    } else if commits.len() == 1 {
+        Ok(Merge::resolved(commits.pop().unwrap()))
     } else {
-        let mut result = Merge::resolved(commit_ids[0].clone());
-        for (i, other_commit_id) in commit_ids.iter().enumerate().skip(1) {
+        let commit_ids = commits.iter().map(|(id, _)| id.clone()).collect_vec();
+        let mut result = Merge::resolved(commits[0].clone());
+        for (i, (other_commit_id, other_prefix)) in commits.iter().enumerate().skip(1) {
             let ancestor_ids = index
                 .common_ancestors(&commit_ids[0..i], &commit_ids[i..][..1])
                 // TODO: indexing error shouldn't be a "BackendError"
                 .map_err(|err| BackendError::Other(err.into()))?;
-            let ancestor_merge = find_recursive_merge_commits(store, index, ancestor_ids)?;
+            let ancestors = ancestor_ids
+                .into_iter()
+                .map(|id| (id, other_prefix.clone()))
+                .collect_vec();
+            let ancestor_merge =
+                find_recursive_merge_commits_with_prefixes(store, index, ancestors)?;
             result = Merge::from_vec(vec![
                 result,
                 ancestor_merge,
-                Merge::resolved(other_commit_id.clone()),
+                Merge::resolved((other_commit_id.clone(), other_prefix.clone())),
             ])
             .flatten();
         }
@@ -341,8 +425,18 @@ impl<'repo> CommitRewriter<'repo> {
             // We wouldn't need to resolve merge conflicts here if the
             // same-change rule is "keep". See 9d4a97381f30 "rewrite: don't
             // resolve intermediate parent tree when rebasing" for details.
-            let old_base_tree_fut = merge_commit_trees(self.mut_repo, &old_parents);
-            let new_base_tree_fut = merge_commit_trees(self.mut_repo, &new_parents);
+            let old_prefixes = self.old_commit.subtree_prefixes();
+            // The new parents replace the old ones positionally, so the
+            // subtree prefixes carry over when the count is unchanged. (When
+            // it changes, writing the rebased commit fails unless the
+            // prefixes are explicitly updated.)
+            let new_prefixes: &[RepoPathBuf] = if new_parents.len() == old_parents.len() {
+                old_prefixes
+            } else {
+                &[]
+            };
+            let old_base_tree_fut = merge_commit_trees(self.mut_repo, &old_parents, old_prefixes);
+            let new_base_tree_fut = merge_commit_trees(self.mut_repo, &new_parents, new_prefixes);
             let old_tree = self.old_commit.tree();
             let (old_base_tree, new_base_tree) = try_join!(old_base_tree_fut, new_base_tree_fut)?;
             (

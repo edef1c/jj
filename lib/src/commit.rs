@@ -140,7 +140,7 @@ impl Commit {
             return Ok(self.tree());
         }
         let parents = self.parents().await?;
-        merge_commit_trees(repo, &parents).await
+        merge_commit_trees(repo, &parents, self.subtree_prefixes()).await
     }
 
     /// Returns the parent tree, merging the parent trees if there are multiple
@@ -153,7 +153,7 @@ impl Commit {
             return Ok(self.tree());
         }
         let parents = self.parents().await?;
-        merge_commit_trees_no_resolve(repo, &parents).await
+        merge_commit_trees_no_resolve(repo, &parents, self.subtree_prefixes()).await
     }
 
     /// Returns whether commit's content is empty. Commit description is not
@@ -270,11 +270,13 @@ pub(crate) async fn is_backend_commit_empty(
     store: &Arc<Store>,
     commit: &backend::Commit,
 ) -> BackendResult<bool> {
-    if let [parent_id] = &*commit.parents {
+    if let [parent_id] = &*commit.parents
+        && commit.subtree_prefixes.is_empty()
+    {
         return Ok(commit.root_tree == *store.get_commit_async(parent_id).await?.tree_ids());
     }
     let parents = try_join_all(commit.parents.iter().map(|id| store.get_commit_async(id))).await?;
-    let parent_tree = merge_commit_trees(repo, &parents).await?;
+    let parent_tree = merge_commit_trees(repo, &parents, &commit.subtree_prefixes).await?;
     Ok(commit.root_tree == *parent_tree.tree_ids())
 }
 
