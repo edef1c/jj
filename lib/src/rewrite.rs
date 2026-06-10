@@ -54,6 +54,7 @@ use crate::repo_path::RepoPathBuf;
 use crate::revset::RevsetExpression;
 use crate::revset::RevsetStreamExt as _;
 use crate::store::Store;
+use crate::subtree::SubtreePrefixes;
 use crate::subtree::graft_merged_tree;
 
 /// Returns the tree of `commit` grafted at `prefix`, with the commit's
@@ -305,19 +306,56 @@ pub struct CommitRewriter<'repo> {
     mut_repo: &'repo mut MutableRepo,
     old_commit: Commit,
     new_parents: Vec<CommitId>,
+    /// Per-parent subtree prefixes for the new parents, kept in lockstep with
+    /// `new_parents`. Either empty or one entry per new parent.
+    new_subtree_prefixes: Vec<RepoPathBuf>,
+}
+
+/// The old commit's subtree prefixes carried over to the new parents. The new
+/// parents replace the old ones positionally, so the prefixes only carry over
+/// when the parent count is unchanged.
+fn carried_subtree_prefixes(old_commit: &Commit, new_parents: &[CommitId]) -> Vec<RepoPathBuf> {
+    let old_prefixes = old_commit.subtree_prefixes();
+    if !old_prefixes.is_empty() && old_prefixes.len() == new_parents.len() {
+        old_prefixes.to_vec()
+    } else {
+        vec![]
+    }
 }
 
 impl<'repo> CommitRewriter<'repo> {
     /// Create a new instance.
+    ///
+    /// If the old commit has subtree prefixes and the number of parents is
+    /// unchanged, the prefixes carry over to the new parents positionally.
     pub fn new(
         mut_repo: &'repo mut MutableRepo,
         old_commit: Commit,
         new_parents: Vec<CommitId>,
     ) -> Self {
+        let new_subtree_prefixes = carried_subtree_prefixes(&old_commit, &new_parents);
         Self {
             mut_repo,
             old_commit,
             new_parents,
+            new_subtree_prefixes,
+        }
+    }
+
+    /// Create a new instance with explicit subtree prefixes for the new
+    /// parents.
+    pub fn new_with_prefixes(
+        mut_repo: &'repo mut MutableRepo,
+        old_commit: Commit,
+        new_parents: Vec<CommitId>,
+        new_subtree_prefixes: Vec<RepoPathBuf>,
+    ) -> Self {
+        assert!(new_subtree_prefixes.is_empty() || new_subtree_prefixes.len() == new_parents.len());
+        Self {
+            mut_repo,
+            old_commit,
+            new_parents,
+            new_subtree_prefixes,
         }
     }
 
@@ -337,28 +375,67 @@ impl<'repo> CommitRewriter<'repo> {
     }
 
     /// Set the old commit's intended new parents.
+    ///
+    /// If the old commit has subtree prefixes and the number of parents is
+    /// unchanged, the prefixes carry over to the new parents positionally.
     pub fn set_new_parents(&mut self, new_parents: Vec<CommitId>) {
+        self.new_subtree_prefixes = carried_subtree_prefixes(&self.old_commit, &new_parents);
         self.new_parents = new_parents;
     }
 
     /// Set the old commit's intended new parents to be the rewritten versions
     /// of the given parents.
     pub fn set_new_rewritten_parents(&mut self, unrewritten_parents: &[CommitId]) {
-        self.new_parents = self.mut_repo.new_parents(unrewritten_parents);
+        // The prefixes apply positionally, so they can only be mapped if the
+        // given parents correspond to the old commit's parents.
+        let old_prefixes: &[RepoPathBuf] =
+            if self.old_commit.subtree_prefixes().len() == unrewritten_parents.len() {
+                self.old_commit.subtree_prefixes()
+            } else {
+                &[]
+            };
+        (self.new_parents, self.new_subtree_prefixes) = self
+            .mut_repo
+            .new_parents_with_prefixes(unrewritten_parents, old_prefixes);
+    }
+
+    /// The subtree prefixes for the intended new parents, in lockstep with
+    /// [`Self::new_parents()`].
+    pub fn new_subtree_prefixes(&self) -> &[RepoPathBuf] {
+        &self.new_subtree_prefixes
     }
 
     /// Update the intended new parents by replacing any occurrence of
-    /// `old_parent` by `new_parents`.
+    /// `old_parent` by `new_parents`. The replacement parents inherit the
+    /// replaced parent's subtree prefix.
     pub fn replace_parent<'a>(
         &mut self,
         old_parent: &CommitId,
         new_parents: impl IntoIterator<Item = &'a CommitId>,
     ) {
         if let Some(i) = self.new_parents.iter().position(|p| p == old_parent) {
-            self.new_parents
-                .splice(i..i + 1, new_parents.into_iter().cloned());
+            let replacements = new_parents.into_iter().cloned().collect_vec();
+            let num_replacements = replacements.len();
+            self.new_parents.splice(i..i + 1, replacements);
             let mut unique = HashSet::new();
-            self.new_parents.retain(|p| unique.insert(p.clone()));
+            if self.new_subtree_prefixes.is_empty() {
+                self.new_parents.retain(|p| unique.insert(p.clone()));
+            } else {
+                let replaced_prefix = self.new_subtree_prefixes[i].clone();
+                self.new_subtree_prefixes.splice(
+                    i..i + 1,
+                    std::iter::repeat_n(replaced_prefix, num_replacements),
+                );
+                let parents = std::mem::take(&mut self.new_parents);
+                let prefixes = std::mem::take(&mut self.new_subtree_prefixes);
+                let (parents, prefixes) = parents
+                    .into_iter()
+                    .zip(prefixes)
+                    .filter(|(p, _)| unique.insert(p.clone()))
+                    .unzip();
+                self.new_parents = parents;
+                self.new_subtree_prefixes = SubtreePrefixes::from_vec(prefixes).into_vec();
+            }
         }
     }
 
@@ -370,7 +447,13 @@ impl<'repo> CommitRewriter<'repo> {
 
     /// If a merge commit would end up with one parent being an ancestor of the
     /// other, then filter out the ancestor.
+    ///
+    /// This is a no-op for subtree merges: removing a "redundant" parent
+    /// would change which trees are grafted where.
     pub fn simplify_ancestor_merge(&mut self) -> IndexResult<()> {
+        if !self.new_subtree_prefixes.is_empty() {
+            return Ok(());
+        }
         let head_set: HashSet<_> = self
             .mut_repo
             .index()
@@ -397,6 +480,16 @@ impl<'repo> CommitRewriter<'repo> {
         self,
         empty: EmptyBehavior,
     ) -> BackendResult<Option<CommitBuilder<'repo>>> {
+        if !self.old_commit.subtree_prefixes().is_empty() && self.new_subtree_prefixes.is_empty() {
+            return Err(BackendError::Other(
+                format!(
+                    "Cannot change the number of parents of commit {id} because it is a subtree \
+                     merge; recreate the merge with `jj new --subtree` instead",
+                    id = self.old_commit.id(),
+                )
+                .into(),
+            ));
+        }
         let old_parents_fut = self.old_commit.parents();
         let new_parents_fut = try_join_all(
             self.new_parents
@@ -413,7 +506,9 @@ impl<'repo> CommitRewriter<'repo> {
             .map(|parent| parent.tree_ids().clone())
             .collect_vec();
 
-        let (was_empty, new_tree) = if new_parent_trees == old_parent_trees {
+        let (was_empty, new_tree) = if new_parent_trees == old_parent_trees
+            && self.new_subtree_prefixes == self.old_commit.subtree_prefixes()
+        {
             (
                 // Optimization: was_empty is only used for newly empty, but when the
                 // parents haven't changed it can't be newly empty.
@@ -426,17 +521,9 @@ impl<'repo> CommitRewriter<'repo> {
             // same-change rule is "keep". See 9d4a97381f30 "rewrite: don't
             // resolve intermediate parent tree when rebasing" for details.
             let old_prefixes = self.old_commit.subtree_prefixes();
-            // The new parents replace the old ones positionally, so the
-            // subtree prefixes carry over when the count is unchanged. (When
-            // it changes, writing the rebased commit fails unless the
-            // prefixes are explicitly updated.)
-            let new_prefixes: &[RepoPathBuf] = if new_parents.len() == old_parents.len() {
-                old_prefixes
-            } else {
-                &[]
-            };
             let old_base_tree_fut = merge_commit_trees(self.mut_repo, &old_parents, old_prefixes);
-            let new_base_tree_fut = merge_commit_trees(self.mut_repo, &new_parents, new_prefixes);
+            let new_base_tree_fut =
+                merge_commit_trees(self.mut_repo, &new_parents, &self.new_subtree_prefixes);
             let old_tree = self.old_commit.tree();
             let (old_base_tree, new_base_tree) = try_join!(old_base_tree_fut, new_base_tree_fut)?;
             (
@@ -465,8 +552,12 @@ impl<'repo> CommitRewriter<'repo> {
             )
         };
         // Ensure we don't abandon commits with multiple parents (merge commits), even
-        // if they're empty.
-        if let [parent] = &new_parents[..] {
+        // if they're empty. A single grafted parent's tree id differs from the
+        // commit's tree even when the commit changes nothing, so subtree
+        // merges are never abandoned either.
+        if let [parent] = &new_parents[..]
+            && self.new_subtree_prefixes.is_empty()
+        {
             let should_abandon = match empty {
                 EmptyBehavior::Keep => false,
                 EmptyBehavior::AbandonNewlyEmpty => {
@@ -484,6 +575,7 @@ impl<'repo> CommitRewriter<'repo> {
             .mut_repo
             .rewrite_commit(&self.old_commit)
             .set_parents(self.new_parents)
+            .set_subtree_prefixes(self.new_subtree_prefixes)
             .set_tree(new_tree);
         Ok(Some(builder))
     }
@@ -498,9 +590,18 @@ impl<'repo> CommitRewriter<'repo> {
     /// Rewrite the old commit onto the new parents without changing its
     /// contents. Returns a `CommitBuilder` for the new commit.
     pub fn reparent(self) -> CommitBuilder<'repo> {
-        self.mut_repo
+        let mut builder = self
+            .mut_repo
             .rewrite_commit(&self.old_commit)
-            .set_parents(self.new_parents)
+            .set_parents(self.new_parents);
+        // If the old commit had prefixes but they couldn't be mapped to the
+        // new parents, leave the (now invalid) copied prefixes in place so
+        // that writing the commit fails instead of silently dropping the
+        // subtree merge strategy.
+        if !self.new_subtree_prefixes.is_empty() || self.old_commit.subtree_prefixes().is_empty() {
+            builder = builder.set_subtree_prefixes(self.new_subtree_prefixes);
+        }
+        builder
     }
 }
 

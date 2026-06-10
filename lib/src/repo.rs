@@ -92,6 +92,7 @@ use crate::refs::diff_named_ref_targets;
 use crate::refs::diff_named_remote_refs;
 use crate::refs::merge_ref_targets;
 use crate::refs::merge_remote_refs;
+use crate::repo_path::RepoPathBuf;
 use crate::revset;
 use crate::revset::RevsetEvaluationError;
 use crate::revset::RevsetExpression;
@@ -110,6 +111,7 @@ use crate::simple_op_heads_store::SimpleOpHeadsStore;
 use crate::simple_op_store::SimpleOpStore;
 use crate::store::Store;
 use crate::submodule_store::SubmoduleStore;
+use crate::subtree::SubtreePrefixes;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionCommitError;
 use crate::tree_merge::MergeOptions;
@@ -1059,6 +1061,60 @@ impl MutableRepo {
         self.rewritten_ids_with(old_ids, |rewrite| !matches!(rewrite, Rewrite::Divergent(_)))
     }
 
+    /// Like [`Self::new_parents()`], but also maps per-parent subtree
+    /// prefixes from the old parents to the new parents: each replacement
+    /// parent inherits the prefix of the old parent whose rewrite produced
+    /// it. If the same new parent is produced by multiple old parents, the
+    /// first one's prefix wins.
+    ///
+    /// `old_prefixes` must be empty or have one entry per entry of `old_ids`.
+    /// The returned prefixes are normalized (empty if every entry is the root
+    /// path).
+    pub fn new_parents_with_prefixes(
+        &self,
+        old_ids: &[CommitId],
+        old_prefixes: &[RepoPathBuf],
+    ) -> (Vec<CommitId>, Vec<RepoPathBuf>) {
+        assert!(old_prefixes.is_empty() || old_prefixes.len() == old_ids.len());
+        if old_prefixes.is_empty() {
+            return (self.new_parents(old_ids), vec![]);
+        }
+        assert!(!old_ids.is_empty());
+        let mut new_ids = Vec::with_capacity(old_ids.len());
+        let mut new_prefixes = Vec::with_capacity(old_ids.len());
+        let mut to_visit = old_ids.iter().zip(old_prefixes).rev().collect_vec();
+        let mut visited = HashSet::new();
+        while let Some((id, prefix)) = to_visit.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let rewrite = self
+                .parent_mapping
+                .get(id)
+                .filter(|&v| !matches!(v, Rewrite::Divergent(_)));
+            match rewrite {
+                None => {
+                    new_ids.push(id.clone());
+                    new_prefixes.push(prefix.clone());
+                }
+                Some(rewrite) => {
+                    let replacements = rewrite.new_parent_ids();
+                    assert!(
+                        !replacements.is_empty(),
+                        "Found empty value for key {id:?} in the parent mapping",
+                    );
+                    to_visit.extend(replacements.iter().rev().map(|new_id| (new_id, prefix)));
+                }
+            }
+        }
+        assert!(
+            !new_ids.is_empty(),
+            "new ids become empty because of cycle in the parent mapping"
+        );
+        debug_assert!(new_ids.iter().all_unique());
+        (new_ids, SubtreePrefixes::from_vec(new_prefixes).into_vec())
+    }
+
     fn rewritten_ids_with(
         &self,
         old_ids: &[CommitId],
@@ -1393,8 +1449,19 @@ impl MutableRepo {
             let parent_ids = new_parents_map
                 .get(old_commit.id())
                 .map_or(old_commit.parent_ids(), |parent_ids| parent_ids);
-            let new_parent_ids = self.new_parents(parent_ids);
-            let rewriter = CommitRewriter::new(self, old_commit, new_parent_ids);
+            // The old commit's subtree prefixes apply positionally, so they
+            // can only be mapped if the parent override (if any) has the same
+            // number of entries as the old parents.
+            let old_prefixes: &[RepoPathBuf] =
+                if old_commit.subtree_prefixes().len() == parent_ids.len() {
+                    old_commit.subtree_prefixes()
+                } else {
+                    &[]
+                };
+            let (new_parent_ids, new_prefixes) =
+                self.new_parents_with_prefixes(parent_ids, old_prefixes);
+            let rewriter =
+                CommitRewriter::new_with_prefixes(self, old_commit, new_parent_ids, new_prefixes);
             callback(rewriter).await?;
         }
         self.update_rewritten_references(options).await?;
