@@ -2929,6 +2929,20 @@ See `jj diffedit` if you'd like to restore portions of files rather than entire 
    This undoes the changes that can be seen with `jj diff -r REVSET`. If `REVSET` only has a single parent, this option is equivalent to `jj restore --into REVSET --from REVSET-`.
 
    The default behavior of `jj restore` is equivalent to `jj restore --changes-in @`.
+* `--subtree <PATH>` — Treat the source as grafted at the given directory
+
+   The `--from` tree is treated as if it were located under PATH, so destination paths under PATH are restored from the corresponding root-relative paths of the source, like `git checkout SOURCE:foo PATH/foo`. Only paths under PATH are affected. With no FILESETS arguments, everything under PATH is restored, resetting a copy vendored with `jj new --subtree` to the source's content.
+
+   Requires `--from`.
+
+   This is an experimental feature. Set config `experimental.subtree-merge = true` to enable it.
+* `--from-subtree <PATH>` — Restore from under the given directory of the source
+
+   The subtree of the `--from` tree at PATH is used as the source, so destination paths are restored from the corresponding paths under PATH of the source, like `git checkout SOURCE:PATH/foo foo`. This is the inverse of `--subtree` and is typically used to copy changes made to a vendored copy back onto its upstream history.
+
+   Requires `--from`.
+
+   This is an experimental feature. Set config `experimental.subtree-merge = true` to enable it.
 * `-i`, `--interactive` — Interactively choose which parts to restore
 * `--tool <NAME>` — Specify diff editor to be used (implies --interactive)
 * `--restore-descendants` — Preserve the content (not the diff) when rebasing descendants

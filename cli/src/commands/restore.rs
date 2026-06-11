@@ -19,12 +19,17 @@ use clap_complete::ArgValueCompleter;
 use indoc::formatdoc;
 use itertools::Itertools as _;
 use jj_lib::commit::conflict_label_for_commits;
+use jj_lib::matchers::IntersectionMatcher;
+use jj_lib::matchers::Matcher;
+use jj_lib::matchers::PrefixMatcher;
 use jj_lib::merge::Diff;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::subtree::SubtreeShift;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+use crate::cli_util::parse_subtree_shift_args;
 use crate::cli_util::print_unmatched_explicit_paths;
 use crate::command_error::CommandError;
 use crate::command_error::user_error;
@@ -86,6 +91,48 @@ pub(crate) struct RestoreArgs {
     #[arg(long, short, hide = true)]
     revision: Option<RevisionArg>,
 
+    /// Treat the source as grafted at the given directory
+    ///
+    /// The `--from` tree is treated as if it were located under PATH, so
+    /// destination paths under PATH are restored from the corresponding
+    /// root-relative paths of the source, like
+    /// `git checkout SOURCE:foo PATH/foo`. Only paths under PATH are
+    /// affected. With no FILESETS arguments, everything under PATH is
+    /// restored, resetting a copy vendored with `jj new --subtree` to the
+    /// source's content.
+    ///
+    /// Requires `--from`.
+    ///
+    /// This is an experimental feature. Set config
+    /// `experimental.subtree-merge = true` to enable it.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "from",
+        conflicts_with = "changes_in"
+    )]
+    subtree: Option<String>,
+
+    /// Restore from under the given directory of the source
+    ///
+    /// The subtree of the `--from` tree at PATH is used as the source, so
+    /// destination paths are restored from the corresponding paths under
+    /// PATH of the source, like `git checkout SOURCE:PATH/foo foo`. This is
+    /// the inverse of `--subtree` and is typically used to copy changes made
+    /// to a vendored copy back onto its upstream history.
+    ///
+    /// Requires `--from`.
+    ///
+    /// This is an experimental feature. Set config
+    /// `experimental.subtree-merge = true` to enable it.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "from",
+        conflicts_with_all = ["subtree", "changes_in"]
+    )]
+    from_subtree: Option<String>,
+
     /// Interactively choose which parts to restore
     #[arg(long, short)]
     interactive: bool,
@@ -137,8 +184,25 @@ pub(crate) async fn cmd_restore(
     }
     workspace_command.check_rewritable([to_commit.id()]).await?;
 
+    let subtree_shift = parse_subtree_shift_args(
+        &workspace_command,
+        args.subtree.as_deref(),
+        args.from_subtree.as_deref(),
+    )?;
+    let from_tree = subtree_shift.apply(&from_tree).await?;
+
     let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
-    let matcher = fileset_expression.to_matcher();
+    let matcher: Box<dyn Matcher> = if let SubtreeShift::GraftAt(prefix) = &subtree_shift {
+        // The grafted source tree is empty outside the prefix, so restrict
+        // the restore to it; destination files outside the prefix are left
+        // alone instead of being restored to absence.
+        Box::new(IntersectionMatcher::new(
+            fileset_expression.to_matcher(),
+            PrefixMatcher::new([prefix]),
+        ))
+    } else {
+        fileset_expression.to_matcher()
+    };
     let diff_selector =
         workspace_command.diff_selector(ui, args.tool.as_deref(), args.interactive)?;
     let to_tree = to_commit.tree();

@@ -77,6 +77,25 @@ $ jj duplicate <trunk-commit> --onto lib@lib-upstream --from-subtree vendor/lib
 Only the commit's changes under `vendor/lib/` are applied; changes to other
 trunk files are dropped from the duplicate.
 
+## Restoring file contents across the prefix
+
+`jj restore` accepts the same pair of options for copying file *contents*
+(rather than commits) across the prefix, like `git checkout SOURCE:foo
+vendor/lib/foo`:
+
+```shell
+# Reset a vendored file (or, with no paths, the whole vendored copy)
+# to the upstream content:
+$ jj restore --from lib@lib-upstream --subtree vendor/lib [vendor/lib/foo]
+
+# While editing on top of the upstream history, take a file's content
+# from the vendored copy:
+$ jj restore --from trunk --from-subtree vendor/lib [foo]
+```
+
+With `--subtree`, only paths under the prefix are affected; other files in
+the destination are left alone.
+
 ## Git interoperability
 
 The prefix is stored in a `jj:subtree-prefixes` extra header of the Git

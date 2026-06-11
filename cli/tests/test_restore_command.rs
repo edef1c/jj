@@ -597,3 +597,180 @@ fn test_restore_interactive_with_paths() -> TestResult {
 fn get_log_output(work_dir: &TestWorkDir) -> CommandOutput {
     work_dir.run_jj(["log", "-T", "bookmarks"])
 }
+
+#[test]
+fn test_restore_subtree() -> TestResult {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Upstream lib history, and a trunk that vendors a modified lib.
+    create_commit_with_files(
+        &work_dir,
+        "lib1",
+        &[],
+        &[("lib.rs", "v1\n"), ("util.rs", "util\n")],
+    );
+    create_commit_with_files(
+        &work_dir,
+        "trunk",
+        &["root()"],
+        &[
+            ("README", "trunk\n"),
+            ("vendor/lib/lib.rs", "v1 modified\n"),
+            ("vendor/lib/local.rs", "local\n"),
+        ],
+    );
+
+    // The flag is gated behind an experimental config.
+    let output = work_dir.run_jj(["restore", "--from", "lib1", "--subtree", "vendor/lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: --subtree is experimental
+    Hint: Set config `experimental.subtree-merge = true` to enable it.
+    [EOF]
+    [exit status: 1]
+    ");
+
+    test_env.add_config("experimental.subtree-merge = true");
+
+    // --subtree requires --from.
+    let output = work_dir.run_jj(["restore", "--subtree", "vendor/lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    error: the following required arguments were not provided:
+      --from <REVSET>
+
+    Usage: jj restore --from <REVSET> --subtree <PATH> [FILESETS]...
+
+    For more information, try '--help'.
+    [EOF]
+    [exit status: 2]
+    ");
+
+    // Restore a single vendored file from the upstream content, like
+    // `git checkout lib1:lib.rs vendor/lib/lib.rs`.
+    work_dir.run_jj(["new", "trunk"]).success();
+    let output = work_dir.run_jj([
+        "restore",
+        "--from",
+        "lib1",
+        "--subtree",
+        "vendor/lib",
+        "vendor/lib/lib.rs",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: vruxwmqv 2bbb7b12 (no description set)
+    Parent commit (@-)      : zsuskuln ed6cf5d3 trunk | trunk
+    Added 0 files, modified 1 files, removed 0 files
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["diff", "--summary"]);
+    insta::assert_snapshot!(output, @"
+    M vendor/lib/lib.rs
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "show", "vendor/lib/lib.rs"]);
+    insta::assert_snapshot!(output, @"
+    v1
+    [EOF]
+    ");
+
+    // With no paths, the whole vendored copy is reset to the source's
+    // content; files outside the prefix are left alone.
+    work_dir.run_jj(["new", "trunk"]).success();
+    let output = work_dir.run_jj(["restore", "--from", "lib1", "--subtree", "vendor/lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: kmkuslsw f6796d56 (no description set)
+    Parent commit (@-)      : zsuskuln ed6cf5d3 trunk | trunk
+    Added 1 files, modified 1 files, removed 1 files
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["diff", "--summary"]);
+    insta::assert_snapshot!(output, @"
+    M vendor/lib/lib.rs
+    D vendor/lib/local.rs
+    A vendor/lib/util.rs
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "list"]);
+    insta::assert_snapshot!(output, @"
+    README
+    vendor/lib/lib.rs
+    vendor/lib/util.rs
+    [EOF]
+    ");
+    Ok(())
+}
+
+#[test]
+fn test_restore_from_subtree() -> TestResult {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+    test_env.add_config("experimental.subtree-merge = true");
+
+    create_commit_with_files(&work_dir, "lib1", &[], &[("lib.rs", "v1\n")]);
+    create_commit_with_files(
+        &work_dir,
+        "trunk",
+        &["root()"],
+        &[
+            ("README", "trunk\n"),
+            ("vendor/lib/lib.rs", "v1 with fix\n"),
+        ],
+    );
+
+    // --subtree and --from-subtree are mutually exclusive.
+    let output = work_dir.run_jj([
+        "restore",
+        "--from",
+        "trunk",
+        "--subtree",
+        "vendor/lib",
+        "--from-subtree",
+        "vendor/lib",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    error: the argument '--subtree <PATH>' cannot be used with '--from-subtree <PATH>'
+
+    Usage: jj restore --from <REVSET> --subtree <PATH> [FILESETS]...
+
+    For more information, try '--help'.
+    [EOF]
+    [exit status: 2]
+    ");
+
+    // On top of the upstream history, restore a file from the vendored copy,
+    // like `git checkout trunk:vendor/lib/lib.rs lib.rs`.
+    work_dir.run_jj(["new", "lib1"]).success();
+    let output = work_dir.run_jj([
+        "restore",
+        "--from",
+        "trunk",
+        "--from-subtree",
+        "vendor/lib",
+        "lib.rs",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: yqosqzyt 6eefd41f (no description set)
+    Parent commit (@-)      : rlvkpnrz da5064b4 lib1 | lib1
+    Added 0 files, modified 1 files, removed 0 files
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["diff", "--summary"]);
+    insta::assert_snapshot!(output, @"
+    M lib.rs
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["file", "show", "lib.rs"]);
+    insta::assert_snapshot!(output, @"
+    v1 with fix
+    [EOF]
+    ");
+    Ok(())
+}
