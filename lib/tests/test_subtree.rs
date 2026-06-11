@@ -23,6 +23,7 @@ use jj_lib::rewrite::RebasedCommit;
 use jj_lib::rewrite::duplicate_commits;
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::rewrite::rebase_commit;
+use jj_lib::rewrite::rebase_commit_with_options;
 use jj_lib::subtree::SubtreeShift;
 use jj_lib::subtree::graft_tree_at_prefix;
 use pollster::FutureExt as _;
@@ -691,4 +692,31 @@ fn test_subtree_shift_apply_to_path() {
         SubtreeShift::ExtractAt(prefix).apply_to_path(repo_path("vendor/library/foo.rs")),
         None
     );
+}
+
+#[test]
+fn test_rebase_subtree_merge_drop_prefixes() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let mut tx = repo.start_transaction();
+    let (trunk, _lib, merge) = setup_subtree_merge(&mut tx, repo)?;
+
+    // Changing the parent count of a subtree merge is normally an error
+    // (covered by test_rebase_subtree_merge_parent_count_change_fails), but
+    // with `drop_subtree_prefixes` the prefix-aware changes are applied and
+    // the result is a plain commit.
+    let options = RebaseOptions {
+        drop_subtree_prefixes: true,
+        ..Default::default()
+    };
+    let rewriter = CommitRewriter::new(tx.repo_mut(), merge, vec![trunk.id().clone()]);
+    let RebasedCommit::Rewritten(rebased) =
+        rebase_commit_with_options(rewriter, &options).block_on()?
+    else {
+        panic!("commit should not be abandoned");
+    };
+    assert!(rebased.subtree_prefixes().is_empty());
+    // The merge had no changes of its own, so the result is trunk's tree.
+    assert_tree_eq!(&rebased.tree(), &trunk.tree());
+    Ok(())
 }

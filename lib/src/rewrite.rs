@@ -315,6 +315,10 @@ pub struct CommitRewriter<'repo> {
     /// apply under a directory of the new parents, extraction applies the
     /// changes made under a directory to a standalone history.
     old_tree_shift: SubtreeShift,
+    /// Whether a subtree merge may be rebased to a different number of
+    /// parents by applying its prefix-aware changes and dropping the
+    /// recorded subtree prefixes.
+    drop_subtree_prefixes: bool,
 }
 
 /// The old commit's subtree prefixes carried over to the new parents. The new
@@ -346,6 +350,7 @@ impl<'repo> CommitRewriter<'repo> {
             new_parents,
             new_subtree_prefixes,
             old_tree_shift: SubtreeShift::None,
+            drop_subtree_prefixes: false,
         }
     }
 
@@ -364,6 +369,7 @@ impl<'repo> CommitRewriter<'repo> {
             new_parents,
             new_subtree_prefixes,
             old_tree_shift: SubtreeShift::None,
+            drop_subtree_prefixes: false,
         }
     }
 
@@ -421,6 +427,13 @@ impl<'repo> CommitRewriter<'repo> {
     /// duplicate commits into or out of a subtree.
     pub fn set_old_tree_shift(&mut self, shift: SubtreeShift) {
         self.old_tree_shift = shift;
+    }
+
+    /// Allow rebasing a subtree merge to a different number of parents. The
+    /// rebased tree is still computed from the commit's prefix-aware changes,
+    /// but the result is a plain commit without the recorded prefixes.
+    pub fn allow_dropping_subtree_prefixes(&mut self) {
+        self.drop_subtree_prefixes = true;
     }
 
     /// Update the intended new parents by replacing any occurrence of
@@ -498,7 +511,10 @@ impl<'repo> CommitRewriter<'repo> {
         self,
         empty: EmptyBehavior,
     ) -> BackendResult<Option<CommitBuilder<'repo>>> {
-        if !self.old_commit.subtree_prefixes().is_empty() && self.new_subtree_prefixes.is_empty() {
+        if !self.old_commit.subtree_prefixes().is_empty()
+            && self.new_subtree_prefixes.is_empty()
+            && !self.drop_subtree_prefixes
+        {
             return Err(BackendError::Other(
                 format!(
                     "Cannot change the number of parents of commit {id} because it is a subtree \
@@ -643,6 +659,9 @@ pub async fn rebase_commit_with_options(
     mut rewriter: CommitRewriter<'_>,
     options: &RebaseOptions,
 ) -> BackendResult<RebasedCommit> {
+    if options.drop_subtree_prefixes {
+        rewriter.allow_dropping_subtree_prefixes();
+    }
     // If specified, don't create commit where one parent is an ancestor of another.
     if options.simplify_ancestor_merge {
         rewriter
@@ -737,6 +756,10 @@ pub struct RebaseOptions {
     /// If a merge commit would end up with one parent being an ancestor of the
     /// other, then filter out the ancestor.
     pub simplify_ancestor_merge: bool,
+    /// Allow rebasing a subtree merge to a different number of parents by
+    /// applying its prefix-aware changes and dropping the recorded subtree
+    /// prefixes, instead of returning an error.
+    pub drop_subtree_prefixes: bool,
 }
 
 /// Configuration for [`MutableRepo::update_rewritten_references()`].
@@ -1150,6 +1173,7 @@ async fn apply_move_commits(
         empty: EmptyBehavior::Keep,
         rewrite_refs: options.rewrite_refs.clone(),
         simplify_ancestor_merge: false,
+        drop_subtree_prefixes: false,
     };
 
     let mut rebased_commits: HashMap<CommitId, RebasedCommit> = HashMap::new();

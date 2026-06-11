@@ -380,6 +380,7 @@ pub(crate) async fn cmd_rebase(
             delete_abandoned_bookmarks: false,
         },
         simplify_ancestor_merge: args.simplify_parents,
+        drop_subtree_prefixes: false,
     };
     let mut workspace_command = command.workspace_helper(ui).await?;
 

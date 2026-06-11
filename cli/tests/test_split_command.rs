@@ -20,6 +20,7 @@ use testutils::TestResult;
 use crate::common::CommandOutput;
 use crate::common::TestEnvironment;
 use crate::common::TestWorkDir;
+use crate::common::create_commit_with_files;
 
 #[must_use]
 fn get_log_output(work_dir: &TestWorkDir) -> CommandOutput {
@@ -1880,4 +1881,107 @@ fn test_split_with_editor_without_message() -> TestResult {
     [EOF]
     ");
     Ok(())
+}
+
+#[test]
+fn test_split_subtree_merge() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+    test_env.add_config("experimental.subtree-merge = true");
+
+    create_commit_with_files(&work_dir, "trunk", &[], &[("README", "trunk\n")]);
+    create_commit_with_files(&work_dir, "lib", &["root()"], &[("lib.rs", "v1\n")]);
+    work_dir
+        .run_jj([
+            "new",
+            "trunk",
+            "--subtree",
+            "vendor/lib=lib",
+            "-m",
+            "import",
+        ])
+        .success();
+    // Local changes inside the import commit: one to the vendored copy, one
+    // to a trunk file.
+    work_dir.write_file("vendor/lib/lib.rs", "v1\nlocal patch\n");
+    work_dir.write_file("NOTES", "notes\n");
+    work_dir
+        .run_jj(["bookmark", "create", "-r@", "mp"])
+        .success();
+    work_dir.run_jj(["new", "root()"]).success();
+
+    // Default split: the merge commit keeps its position (and prefixes) with
+    // the selected changes; the remainder becomes a plain child.
+    let output = work_dir.run_jj(["split", "-r", "mp", "-m", "tweak", "vendor/lib/lib.rs"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Selected changes : royxmykx e03f53ba tweak
+    Remaining changes: yostqsxw f16a17ff mp | import
+    [EOF]
+    ");
+    let output = work_dir.run_jj([
+        "log",
+        "--stat",
+        "-r",
+        "mp | mp-",
+        "--no-graph",
+        "-T",
+        r#"description.first_line() ++ "\n""#,
+    ]);
+    insta::assert_snapshot!(output, @"
+    import
+    NOTES | 1 +
+    1 file changed, 1 insertion(+), 0 deletions(-)
+    tweak
+    vendor/lib/lib.rs | 1 +
+    1 file changed, 1 insertion(+), 0 deletions(-)
+    [EOF]
+    ");
+    work_dir.run_jj(["undo"]).success();
+
+    // Split with a destination: the remaining changes stay in place as the
+    // subtree merge; the selected changes are extracted into a plain commit.
+    let output = work_dir.run_jj([
+        "split",
+        "-r",
+        "mp",
+        "--onto",
+        "mp",
+        "-m",
+        "local patch",
+        "vendor/lib/lib.rs",
+        "NOTES",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: All changes have been selected, so the original revision will become empty
+    Selected changes : kmkuslsw 6c68a6c1 local patch
+    Remaining changes: royxmykx 7f597043 mp | (empty) import
+    [EOF]
+    ");
+    let output = work_dir.run_jj([
+        "log",
+        "--stat",
+        "-r",
+        "mp | mp+",
+        "--no-graph",
+        "-T",
+        r#"description.first_line() ++ "\n""#,
+    ]);
+    insta::assert_snapshot!(output, @"
+    local patch
+    NOTES             | 1 +
+    vendor/lib/lib.rs | 1 +
+    2 files changed, 2 insertions(+), 0 deletions(-)
+    import
+    0 files changed, 0 insertions(+), 0 deletions(-)
+    [EOF]
+    ");
+    // The merge commit is now a pristine import.
+    let output = work_dir.run_jj(["file", "show", "-r", "mp", "vendor/lib/lib.rs"]);
+    insta::assert_snapshot!(output, @"
+    v1
+    [EOF]
+    ");
 }

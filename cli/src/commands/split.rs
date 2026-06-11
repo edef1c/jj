@@ -334,8 +334,14 @@ pub(crate) async fn cmd_split(
     // Create the second commit, which includes everything the user didn't
     // select.
     let second_commit = {
+        // A subtree merge must keep its parents and recorded prefixes. When
+        // the selected commit is moved away, the remaining changes cannot be
+        // represented as a child of it, so compute the remaining tree in
+        // place, like a parallel split.
+        let keep_position =
+            parallel || (use_move_flags && !target.commit.subtree_prefixes().is_empty());
         let target_tree = target.commit.tree();
-        let new_tree = if parallel {
+        let new_tree = if keep_position {
             // Merge the original commit tree with its parent using the tree
             // containing the user selected changes as the base for the merge.
             // This results in a tree with the changes the user didn't select.
@@ -357,13 +363,19 @@ pub(crate) async fn cmd_split(
         } else {
             target_tree
         };
-        let parents = if parallel {
+        let parents = if keep_position {
             target.commit.parent_ids().to_vec()
         } else {
             vec![first_commit.id().clone()]
         };
         let mut commit_builder = tx.repo_mut().rewrite_commit(&target.commit).detach();
         commit_builder.set_parents(parents).set_tree(new_tree);
+        if !keep_position {
+            // The second commit is a child of the first commit rather than a
+            // merge of the original parents, so the recorded subtree prefixes
+            // (if any) don't apply to it.
+            commit_builder.set_subtree_prefixes(vec![]);
+        }
         let mut show_editor = args.editor;
         if !use_move_flags {
             commit_builder.clear_rewrite_source();
@@ -467,6 +479,9 @@ async fn move_first_commit(
                 delete_abandoned_bookmarks: false,
             },
             simplify_ancestor_merge: false,
+            // The selected commit's prefix-aware changes are extracted into
+            // a plain commit at the destination.
+            drop_subtree_prefixes: true,
         },
     )
     .await?;
