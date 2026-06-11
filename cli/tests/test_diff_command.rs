@@ -4089,3 +4089,118 @@ fn test_diff_revisions() {
     [EOF]
     ");
 }
+
+#[test]
+fn test_diff_subtree() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Upstream lib history, and a trunk that vendors a locally modified lib
+    // with an extra local file; the upstream has a file the vendored copy
+    // lacks.
+    create_commit_with_files(
+        &work_dir,
+        "lib1",
+        &[],
+        &[("lib.rs", "v1\n"), ("util.rs", "util\n")],
+    );
+    create_commit_with_files(
+        &work_dir,
+        "trunk",
+        &["root()"],
+        &[
+            ("README", "trunk\n"),
+            ("vendor/lib/lib.rs", "v1 modified\n"),
+            ("vendor/lib/local.rs", "local\n"),
+        ],
+    );
+
+    // The flag is gated behind an experimental config.
+    let output = work_dir.run_jj(["diff", "--from", "lib1", "--subtree", "vendor/lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: --subtree is experimental
+    Hint: Set config `experimental.subtree-merge = true` to enable it.
+    [EOF]
+    [exit status: 1]
+    ");
+
+    test_env.add_config("experimental.subtree-merge = true");
+
+    // --subtree requires --from.
+    let output = work_dir.run_jj(["diff", "--subtree", "vendor/lib"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    error: the following required arguments were not provided:
+      --from <REVSET>
+
+    Usage: jj diff --from <REVSET> --subtree <PATH> [FILESETS]...
+
+    For more information, try '--help'.
+    [EOF]
+    [exit status: 2]
+    ");
+
+    // How the vendored copy differs from upstream: changes are shown at the
+    // vendored paths, and trunk files outside the prefix are not compared.
+    let output = work_dir.run_jj([
+        "diff",
+        "--from",
+        "lib1",
+        "--subtree",
+        "vendor/lib",
+        "--summary",
+    ]);
+    insta::assert_snapshot!(output, @"
+    M vendor/lib/lib.rs
+    A vendor/lib/local.rs
+    D vendor/lib/util.rs
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["diff", "--from", "lib1", "--subtree", "vendor/lib"]);
+    insta::assert_snapshot!(output, @"
+    Modified regular file vendor/lib/lib.rs:
+       1     : v1
+            1: v1 modified
+    Added regular file vendor/lib/local.rs:
+            1: local
+    Removed regular file vendor/lib/util.rs:
+       1     : util
+    [EOF]
+    ");
+
+    // The same comparison in root-relative terms, from the vendored copy to
+    // the upstream.
+    let output = work_dir.run_jj([
+        "diff",
+        "--from",
+        "trunk",
+        "--from-subtree",
+        "vendor/lib",
+        "--to",
+        "lib1",
+        "--summary",
+    ]);
+    insta::assert_snapshot!(output, @"
+    M lib.rs
+    D local.rs
+    A util.rs
+    [EOF]
+    ");
+
+    // Path arguments compose with the prefix restriction.
+    let output = work_dir.run_jj([
+        "diff",
+        "--from",
+        "lib1",
+        "--subtree",
+        "vendor/lib",
+        "--summary",
+        "vendor/lib/lib.rs",
+    ]);
+    insta::assert_snapshot!(output, @"
+    M vendor/lib/lib.rs
+    [EOF]
+    ");
+}

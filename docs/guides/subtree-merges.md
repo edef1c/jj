@@ -96,6 +96,21 @@ $ jj restore --from trunk --from-subtree vendor/lib [foo]
 With `--subtree`, only paths under the prefix are affected; other files in
 the destination are left alone.
 
+## Comparing a vendored copy against upstream
+
+`jj diff` accepts the same options for comparing trees across the prefix:
+
+```shell
+# How the vendored copy differs from the upstream, at vendored paths:
+$ jj diff --from lib@lib-upstream --subtree vendor/lib
+
+# The same comparison in root-relative terms:
+$ jj diff --from trunk --from-subtree vendor/lib --to lib@lib-upstream
+```
+
+With `--subtree`, only paths under the prefix are compared; files elsewhere
+in the destination are ignored rather than shown as added.
+
 ## Git interoperability
 
 The prefix is stored in a `jj:subtree-prefixes` extra header of the Git

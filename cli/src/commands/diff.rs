@@ -19,6 +19,9 @@ use futures::future::try_join_all;
 use indexmap::IndexSet;
 use itertools::Itertools as _;
 use jj_lib::copies::CopyRecords;
+use jj_lib::matchers::IntersectionMatcher;
+use jj_lib::matchers::Matcher;
+use jj_lib::matchers::PrefixMatcher;
 use jj_lib::merge::Diff;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
@@ -28,6 +31,7 @@ use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
+use crate::cli_util::parse_subtree_shift_args;
 use crate::cli_util::print_unmatched_explicit_paths;
 use crate::cli_util::short_commit_hash;
 use crate::command_error::CommandError;
@@ -91,6 +95,42 @@ pub(crate) struct DiffArgs {
     #[arg(add = ArgValueCompleter::new(complete::modified_revision_or_range_files))]
     paths: Vec<String>,
 
+    /// Treat the source as grafted at the given directory
+    ///
+    /// The `--from` tree is treated as if it were located under PATH, so
+    /// destination paths under PATH are compared against the corresponding
+    /// root-relative paths of the source. Only paths under PATH are
+    /// compared. This shows how a copy vendored with `jj new --subtree`
+    /// differs from its upstream, e.g.
+    /// `jj diff --from lib@upstream --subtree vendor/lib`.
+    ///
+    /// Requires `--from`.
+    ///
+    /// This is an experimental feature. Set config
+    /// `experimental.subtree-merge = true` to enable it.
+    #[arg(long, value_name = "PATH", requires = "from")]
+    subtree: Option<String>,
+
+    /// Compare from under the given directory of the source
+    ///
+    /// The subtree of the `--from` tree at PATH is used as the source, so
+    /// destination paths are compared against the corresponding paths under
+    /// PATH of the source. This is the inverse of `--subtree`, showing how
+    /// an upstream differs from a vendored copy in root-relative terms, e.g.
+    /// `jj diff --from trunk --from-subtree vendor/lib --to lib@upstream`.
+    ///
+    /// Requires `--from`.
+    ///
+    /// This is an experimental feature. Set config
+    /// `experimental.subtree-merge = true` to enable it.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "from",
+        conflicts_with = "subtree"
+    )]
+    from_subtree: Option<String>,
+
     /// Render each file diff entry using the given template
     ///
     /// All 0-argument methods of the [`TreeDiffEntry` type] are available as
@@ -123,8 +163,23 @@ pub(crate) async fn cmd_diff(
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui).await?;
     let repo = workspace_command.repo();
+    let subtree_shift = parse_subtree_shift_args(
+        &workspace_command,
+        args.subtree.as_deref(),
+        args.from_subtree.as_deref(),
+    )?;
     let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
-    let matcher = fileset_expression.to_matcher();
+    let matcher: Box<dyn Matcher> = if let SubtreeShift::GraftAt(prefix) = &subtree_shift {
+        // The grafted source tree is empty outside the prefix, so restrict
+        // the comparison to it; destination files outside the prefix would
+        // otherwise all show up as added.
+        Box::new(IntersectionMatcher::new(
+            fileset_expression.to_matcher(),
+            PrefixMatcher::new([prefix]),
+        ))
+    } else {
+        fileset_expression.to_matcher()
+    };
 
     let from_tree;
     let to_tree;
@@ -137,11 +192,19 @@ pub(crate) async fn cmd_diff(
         };
         let from = resolve_revision(&args.from).await?;
         let to = resolve_revision(&args.to).await?;
-        from_tree = from.tree();
+        from_tree = subtree_shift.apply(&from.tree()).await?;
         to_tree = to.tree();
 
         let records = get_copy_records(repo.store(), from.id(), to.id(), &matcher).await?;
-        copy_records.add_records(records);
+        // The records' source paths are in the `--from` commit's own
+        // coordinates; translate them by the subtree shift, dropping records
+        // whose source is not in the shifted view.
+        copy_records.add_records(records.into_iter().filter_map(|mut record| {
+            record.source = subtree_shift.apply_to_path(&record.source)?;
+            // A record that maps a path to itself carries no information
+            // (and would render as a self-copy).
+            (record.source != record.target).then_some(record)
+        }));
     } else {
         let revision_args = args
             .revisions

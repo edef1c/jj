@@ -955,6 +955,20 @@ If no option is specified, it defaults to `-r @`.
 * `-t`, `--to <REVSET>` — Show changes to this revision
 
    If none of `-r`, `-f`, or `-t` is provided, then the default is `-r @`.
+* `--subtree <PATH>` — Treat the source as grafted at the given directory
+
+   The `--from` tree is treated as if it were located under PATH, so destination paths under PATH are compared against the corresponding root-relative paths of the source. Only paths under PATH are compared. This shows how a copy vendored with `jj new --subtree` differs from its upstream, e.g. `jj diff --from lib@upstream --subtree vendor/lib`.
+
+   Requires `--from`.
+
+   This is an experimental feature. Set config `experimental.subtree-merge = true` to enable it.
+* `--from-subtree <PATH>` — Compare from under the given directory of the source
+
+   The subtree of the `--from` tree at PATH is used as the source, so destination paths are compared against the corresponding paths under PATH of the source. This is the inverse of `--subtree`, showing how an upstream differs from a vendored copy in root-relative terms, e.g. `jj diff --from trunk --from-subtree vendor/lib --to lib@upstream`.
+
+   Requires `--from`.
+
+   This is an experimental feature. Set config `experimental.subtree-merge = true` to enable it.
 * `-T`, `--template <TEMPLATE>` — Render each file diff entry using the given template
 
    All 0-argument methods of the [`TreeDiffEntry` type] are available as keywords in the template expression. See [`jj help -k templates`] for more information.

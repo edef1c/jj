@@ -37,8 +37,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `git cherry-pick -Xsubtree=PATH`, and `jj duplicate --from-subtree PATH`
   applies the changes made under a directory to a standalone history, for
   picking changes to a vendored copy back onto its upstream. `jj restore`
-  accepts the same options for restoring file contents across a subtree
-  prefix.
+  and `jj diff` accept the same options for restoring file contents and
+  comparing trees across a subtree prefix.
 
 ### Fixed bugs
 
